@@ -1,0 +1,131 @@
+# Exemplo de config.toml para o workspace Optum (dop >= 0.5, runtime data-driven).
+#
+# Copie/adapte para o seu $DOP_CONFIG (ou ~/.config/dop/config.toml).
+# IMPORTANTE:
+#   - `service` deve casar com o nome do serviço no docker-compose.yml.
+#   - `e2e_suite` deve casar com o diretório em e2e/<suite>/.
+#   - Segredos NÃO vão aqui — apenas nomes de variáveis de ambiente (*_env).
+
+[workspaces.optum]
+root = "/opt/wks/csptech/optum"
+demands_dir = "docs/RFC"
+platform = "azure_devops"
+auth_method = "token"
+
+[workspaces.optum.credentials]
+login_env = "GIT_OPTUM_LOGIN"
+token_env = "GIT_OPTUM_TOKEN"
+
+[workspaces.optum.platform_config]
+org_env = "AZURE_DEVOPS_ORG"
+project_env = "AZURE_DEVOPS_PROJECT"
+reviewers_env = "AZURE_DEVOPS_REVIEWERS"
+
+# ── Repos (fluxo Git/PR) ──
+[workspaces.optum.repos.lifesupport-api]
+dir = "repos/lifesupport-api"
+base_branch = "OG-GLOBAL"
+pr_targets = ["OG-GLOBAL"]
+
+# (demais repos omitidos por brevidade)
+
+# ─────────────────────────────────────────────────────────────────────────
+# Runtime (data-driven)
+# ─────────────────────────────────────────────────────────────────────────
+[workspaces.optum.runtime]
+orchestrator = "docker_compose"      # docker_compose | (futuro: kubernetes/okd/rancher)
+infra = ["mongodb", "allure"]
+default_max_strikes = 3
+
+# ── Back-ends ──
+[workspaces.optum.runtime.apps.lifesupport-api]
+service = "lifesupport-api"
+role = "backend"
+port = 8082
+debug_port = 5005
+aliases = ["ls"]
+url_env = "LIFESUPPORT_URL"
+fallback_url_env = "AZURE_LIFESUPPORT_URL"
+
+[workspaces.optum.runtime.apps.optum-support-be]
+service = "optum-support-be"
+role = "backend"
+port = 8080
+debug_port = 5006
+aliases = ["osb"]
+url_env = "OPTUM_SUPPORT_BE_URL"
+fallback_url_env = "AZURE_OPTUM_SUPPORT_BE_URL"
+
+[workspaces.optum.runtime.apps.providers-back-end]
+service = "providers-back-end"
+role = "backend"
+port = 8083
+url_env = "PROVIDERS_BE_URL"
+fallback_url_env = "AZURE_PROVIDERS_BE_URL"
+
+[workspaces.optum.runtime.apps.canal-empresa-be]
+service = "canal-empresa-be"
+role = "backend"
+port = 8084
+url_env = "CANAL_EMPRESA_BE_URL"
+fallback_url_env = "AZURE_CANAL_EMPRESA_BE_URL"
+
+[workspaces.optum.runtime.apps.appoptum-be]
+service = "appoptum-be"
+role = "backend"
+port = 8081
+url_env = "APPOPTUM_BE_URL"
+fallback_url_env = "AZURE_APPOPTUM_BE_URL"
+
+# ── Front-ends (build no host; nginx serve o artefato) ──
+[workspaces.optum.runtime.apps.optum-support-fe]
+service = "optum-support-fe"
+role = "frontend"
+port = 5173
+aliases = ["osf"]
+depends_on = ["optum-support-be"]
+e2e_suite = "optum-support-fe"
+[workspaces.optum.runtime.apps.optum-support-fe.build]
+dir = "repos/optum-support-fe"
+command = "npx vite build"
+artifact = "dist"
+
+[workspaces.optum.runtime.apps.providers-front-end]
+service = "providers-front-end"
+role = "frontend"
+port = 5174
+aliases = ["pfe"]
+depends_on = ["providers-back-end"]
+e2e_suite = "providers-front-end"
+[workspaces.optum.runtime.apps.providers-front-end.build]
+dir = "repos/providers-front-end"
+command = "npx vue-cli-service build"
+artifact = "dist"
+
+[workspaces.optum.runtime.apps.canal-empresa-fe]
+service = "Canal-empresa-fe"            # casar com o serviço no docker-compose.yml
+role = "frontend"
+port = 5175
+aliases = ["cef"]
+depends_on = ["canal-empresa-be"]
+e2e_suite = "Canal-empresa-fe"          # casar com o diretório e2e/Canal-empresa-fe/
+[workspaces.optum.runtime.apps.canal-empresa-fe.build]
+dir = "repos/Canal-empresa-fe"
+command = "npx vue-cli-service build"
+artifact = "dist"
+
+# ── Backend-specific (docker compose) ──
+[workspaces.optum.runtime.docker_compose]
+compose_file = "docker-compose.yml"
+env_files = ["docker/.env", "docker/.env.runtime"]
+project_name = "optum-dev"              # prefixo de volume (docker compose project)
+
+[workspaces.optum.runtime.docker_compose.ephemeral_runner]
+service = "playwright-env"
+profile = "e2e"
+
+[workspaces.optum.runtime.docker_compose.clean]
+maven = ["m2-cache"]
+allure = ["allure-results", "allure-reports"]
+node_modules = ["optum-fe-node_modules", "providers-fe-node_modules", "canal-fe-node_modules"]
+be_target = ["lifesupport-target", "optum-be-target", "providers-be-target", "canal-be-target"]
