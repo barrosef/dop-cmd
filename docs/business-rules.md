@@ -17,8 +17,9 @@ repositories, each needing its own running copy of the applications it changes, 
 its own reports, **without one demand ever seeing another's code or state.**
 
 `dop` is the only way that environment is touched: brought up, fed, observed, tested, torn down. It
-does **no governance**: no branch, commit, push, pull request, card or task-manager call. The single
-piece of git it reads is `git worktree list`, to find where a demand's code is.
+does **no governance**: no branch, commit, push, pull request, card or task-manager call. The git it
+reads is `git worktree list` (where a demand's code is) and, for a companion's label only (B31),
+`git status --porcelain` and the checkout's branch and sha — all read-only.
 
 ## 2. The environment
 
@@ -210,3 +211,12 @@ machines; a cluster recreated with a host mount (R5, deferred by the manager).
 | 13 token / missing path | B28 | | 13 Testcontainers | B35 |
 | 14 `--repo` | B29 | | | |
 | 15 manifests/secrets/k8s untracked | B30 + spec step 3 | | | |
+
+### Step-1 choices accepted by the architect (28/09)
+
+`Runner.run` takes a `command`; verbs lock through `ctx.lock(unit)`; `Scope.skipped` carries every
+result decided during resolution; required `dop.toml` keys are those the core enforces; a front-end
+build variable's fallback is that front-end's own `calls` entry for the target app; the base layout
+`demand/<dir>/`, `demand/{backends,frontends}/<app>/` (+ shared dirs by kind) is a contract with the
+workspace; a named demand that is not present is skipped with the reason on every verb except `up`
+and `down`.

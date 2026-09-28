@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Fake git for dop's tests. For `git -C <dir> worktree list --porcelain` it prints
+$DOP_FAKE_STATE/git/<basename of dir>.porcelain; <basename>.fail makes it fail;
+`status --porcelain` prints <basename>.status when present."""
+import json, os, sys
+from pathlib import Path
+
+state = Path(os.environ["DOP_FAKE_STATE"])
+argv = sys.argv[1:]
+with (state / "git.log").open("a") as fh:
+    fh.write(json.dumps(argv) + "\n")
+d = None
+if argv[:1] == ["-C"]:
+    d, argv = argv[1], argv[2:]
+base = state / "git" / Path(d or ".").name
+if (base.parent / (base.name + ".fail")).exists():
+    print(f"fatal: not a git repository: {d}", file=sys.stderr); sys.exit(128)
+if argv[:3] == ["worktree", "list", "--porcelain"]:
+    p = base.parent / (base.name + ".porcelain")
+    sys.stdout.write(p.read_text() if p.exists() else f"worktree {d}\nHEAD {'a' * 40}\nbranch refs/heads/main\n")
+    sys.exit(0)
+if argv[:2] == ["status", "--porcelain"]:
+    p = base.parent / (base.name + ".status")
+    if p.exists():
+        sys.stdout.write(p.read_text())
+    sys.exit(0)
+print(f"fake git: unexpected {argv}", file=sys.stderr); sys.exit(2)

@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Fake kubectl for dop's tests. State lives in $DOP_FAKE_STATE:
+contexts (one per line), namespaces.json ([{name, labels}]), kube_fail (exists -> reads fail).
+Every call is appended to kubectl.log as a JSON line."""
+import json, os, sys
+from pathlib import Path
+
+state = Path(os.environ["DOP_FAKE_STATE"])
+argv = sys.argv[1:]
+with (state / "kubectl.log").open("a") as fh:
+    fh.write(json.dumps(argv) + "\n")
+
+ctx = None
+if len(argv) >= 2 and argv[0] == "--context":
+    ctx, argv = argv[1], argv[2:]
+
+if argv[:2] == ["config", "get-contexts"]:
+    contexts = (state / "contexts").read_text().split() if (state / "contexts").exists() else []
+    name = argv[2]
+    if name in contexts:
+        print(name); sys.exit(0)
+    print(f"error: context {name} not found", file=sys.stderr); sys.exit(1)
+
+if ctx is None:
+    print("fake kubectl: called without --context", file=sys.stderr); sys.exit(99)
+
+if (state / "kube_fail").exists():
+    print("The connection to the server was refused", file=sys.stderr); sys.exit(1)
+
+nss = json.loads((state / "namespaces.json").read_text()) if (state / "namespaces.json").exists() else []
+
+def obj(ns):
+    return {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": ns["name"], "labels": ns.get("labels", {})}}
+
+if argv[:2] == ["get", "namespaces"]:
+    sel = argv[argv.index("-l") + 1] if "-l" in argv else None
+    items = []
+    for ns in nss:
+        if sel:
+            k, _, v = sel.partition("=")
+            if ns.get("labels", {}).get(k) != v:
+                continue
+        items.append(obj(ns))
+    print(json.dumps({"apiVersion": "v1", "kind": "List", "items": items})); sys.exit(0)
+
+if argv[:2] == ["get", "namespace"]:
+    for ns in nss:
+        if ns["name"] == argv[2]:
+            print(json.dumps(obj(ns))); sys.exit(0)
+    if "--ignore-not-found" in argv:
+        sys.exit(0)
+    print(f'Error from server (NotFound): namespaces "{argv[2]}" not found', file=sys.stderr); sys.exit(1)
+
+sys.exit(0)

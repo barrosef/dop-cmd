@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""Fake docker for dop's tests. Every call is appended to $DOP_FAKE_STATE/docker.log as a JSON
+line. docker_fail holds a sub-command (cp, exec, run) to fail; docker_staged_empty makes the
+staged-copy check print nothing."""
+import json, os, sys
+from pathlib import Path
+
+state = Path(os.environ["DOP_FAKE_STATE"])
+argv = sys.argv[1:]
+with (state / "docker.log").open("a") as fh:
+    fh.write(json.dumps(argv) + "\n")
+fail = (state / "docker_fail").read_text().strip() if (state / "docker_fail").exists() else ""
+if argv and argv[0] == fail:
+    print(f"fake docker: {fail} failed", file=sys.stderr); sys.exit(1)
+if argv[:1] == ["exec"] and "ls -A" in " ".join(argv):
+    if not (state / "docker_staged_empty").exists():
+        print("index.html")
+sys.exit(0)
