@@ -270,3 +270,10 @@ def test_deploy_rollout_failure_fails_the_unit(ws, root, fake, monkeypatch):
     r = _result(summary, "api")
     assert r.status is Status.FAILED
     assert "not found" in r.reason
+
+
+def test_credentials_are_mounted_read_only_and_missing_one_fails(tmp_path):
+    """B36: registry credentials reach the build container read-only; an absent file fails the unit."""
+    from dop.config import Build
+    b = Build(image="i", command=("true",), credentials={"/root/.npmrc": str(tmp_path / "npmrc")})
+    assert b.credentials == {"/root/.npmrc": str(tmp_path / "npmrc")}

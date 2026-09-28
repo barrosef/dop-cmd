@@ -15,6 +15,7 @@ for every string `forbidden` names; a hit fails the unit, naming the file and th
 from __future__ import annotations
 
 import shutil
+import os
 from pathlib import Path
 
 from ..address import expand
@@ -99,6 +100,11 @@ def _run_one(ctx: Context, unit: Unit) -> UnitResult:
     mounts = [Mount(dest, _WORKDIR)]
     if app.kind == "backend":
         mounts.append(Mount(_MAVEN_CACHE_VOLUME, _MAVEN_CACHE_PATH))
+    for dst, src in app.build.credentials.items():  # B36: read-only, never copied, never printed
+        host = Path(os.path.expanduser(src))
+        if not host.is_file():
+            raise RuntimeError(f"credential file {src} (for {dst}) does not exist on this host")
+        mounts.append(Mount(host, dst, readonly=True))
 
     proc = ctx.runner.run(
         app.build.image, mounts=mounts, env=env, workdir=_WORKDIR, command=app.build.command,

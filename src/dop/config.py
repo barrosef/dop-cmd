@@ -60,6 +60,8 @@ class Build:
     image: str
     command: tuple[str, ...]  # a string in the file becomes ("sh", "-c", string)
     env: dict[str, str] = field(default_factory=dict)  # values may hold {url:<app>} (B17)
+    # Host credential files mounted read-only into the build container (B36): container path -> host path.
+    credentials: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -323,7 +325,7 @@ class _Parser:
         if not _DNS_LABEL.match(service):
             raise self.fail(f"{w}.service", "must be a lower-case DNS label")
 
-        b = self.table(t["build"], f"{w}.build", ("image", "command"), ("env",))
+        b = self.table(t["build"], f"{w}.build", ("image", "command"), ("env", "credentials"))
         cmd = b["command"]
         if isinstance(cmd, str):
             command: tuple[str, ...] = ("sh", "-c", self.string(cmd, f"{w}.build.command"))
@@ -335,6 +337,7 @@ class _Parser:
             image=self.string(b["image"], f"{w}.build.image"),
             command=command,
             env=self.str_map(b.get("env", {}), f"{w}.build.env"),
+            credentials=self.str_map(b.get("credentials", {}), f"{w}.build.credentials"),
         )
 
         calls_raw = t.get("calls", [])

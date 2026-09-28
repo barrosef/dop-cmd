@@ -227,3 +227,8 @@ Maven cache is the docker volume `dop-maven-cache`; a back-end rollout waits 180
 applies once per demand, outside the unit lock — two concurrent `up` on the same demand are not
 serialized (known, not handled today). Reports are synced to
 `<node_root>/<shared_namespace>/reports/<DEMAND>/<project>/`, which the `reports` service serves.
+
+- **B36 — Build credentials.** A build that needs a private registry declares, per app, host
+  credential files (`build.credentials = { "<path in container>" = "<host path>" }`). They are
+  mounted read-only, never copied into a build directory or an artifact, never printed. An absent
+  file fails the unit naming the path, not the content.
