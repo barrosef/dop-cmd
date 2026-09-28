@@ -1,0 +1,172 @@
+# `dop` — business rules
+
+**Date:** 2026-09-28 · **Authority:** this document · **Branch:** `k3s` (orphan — nothing is
+inherited from the earlier tools that carried the name)
+
+> What `dop` must do, stated so that the architect specifies against it, the reviewer attacks it and
+> the QA team judges the tool by it. The earlier `dop-cli` / `dop-cmd` are **not** a reference: a
+> behaviour they had is neither a requirement nor a regression. Where this document is silent, the
+> tool does nothing.
+
+---
+
+## 1. What `dop` is for
+
+One operator — a human or an agent — works on **several demands at once**, each touching several
+repositories, each needing its own running copy of the applications it changes, its own tests and
+its own reports, **without one demand ever seeing another's code or state.**
+
+`dop` is the only way that environment is touched: brought up, fed, observed, tested, torn down. It
+does **no governance**: no branch, commit, push, pull request, card or task-manager call. The single
+piece of git it reads is `git worktree list`, to find where a demand's code is.
+
+## 2. The environment
+
+- **B1 — One cluster.** A local k3s cluster (k3d) named in the workspace config. `dop` acts only when
+  the active kube context is that cluster's; any other context is refused before anything happens.
+  Client production contexts live in the same kubeconfig — this rule is what keeps them safe.
+- **B2 — One entry port.** The browser reaches everything through one host port (the cluster load
+  balancer, `8080` today). No service gets a port of its own. Ports are for attaching a debugger
+  only.
+- **B3 — Every service by name.** A demand's application answers at
+  `<app>.<demand>.<domain>:<port>` (`optum-support-fe.suopt-1530.localhost:8080`); shared services
+  at `<service>.<domain>:<port>` (`reports.localhost:8080`, `allure.localhost:8080`). Lower case
+  always. The domain is `localhost`, so no DNS or hosts-file setup exists. The scheme lives in the
+  workspace config; the tool never hard-codes a host or a port.
+- **B4 — One namespace per demand.** A demand present in the environment is one namespace,
+  `<prefix>-<demand>` (lower case), labelled with the demand key. Shared services live in one
+  shared namespace. Nothing of one demand is reachable from another demand's namespace.
+- **B5 — Databases stay remote.** No database or queue runs in the cluster. Applications reach the
+  remote ones exactly as today; credentials come from the workspace's env file and are never
+  printed.
+- **B6 — The cluster never sees the host disk.** Artifacts enter the node by copy
+  (`docker cp` into the node container) under `/workspace/<namespace>/<app>/`. Workloads mount that
+  directory (`hostPath`, `type: Directory`, never a file, never `DirectoryOrCreate`). A copy
+  replaces the directory's content; it does not survive recreation of the node, so everything is
+  re-copied after one.
+
+## 3. The demand
+
+- **B7 — A demand is named, never guessed.** A demand key (`SUOPT-1530`) is given by the operator,
+  matched `^[A-Za-z]+-\d+$`, upper-cased. Nothing is inferred from the working directory, a branch
+  or a state file.
+- **B8 — A demand's code is its worktree.** For each repository, the demand's code is the worktree
+  whose branch contains the key as a whole token (`git worktree list`). None → that repository is
+  not part of the demand. More than one → that unit fails naming the candidates; other units run.
+- **B9 — A demand's applications** are the configured applications whose repository has a worktree
+  for the demand (B8). The operator can narrow them (`--app`); never widen beyond them.
+- **B10 — A demand enters and leaves explicitly.** `dop up --tasks K` brings it into the
+  environment; `dop down --tasks K` removes its namespace and its copied artifacts. Nothing else
+  creates or destroys a demand. A demand that shipped but was never brought down stays present —
+  that is visible in `dop status`, not hidden.
+
+## 4. How every command behaves
+
+- **B11 — No filter means everything present.** A command with no filter acts on every demand
+  present in the environment (B4 labels are the only source). Nothing present → the command says
+  so and exits *partial* (3).
+- **B12 — Filters only narrow.** `--tasks K…`, `--app A…` mean the same thing on every command;
+  they intersect, and several values on one filter unite. The only command a filter can *add* to is
+  `up`, and only by the demands it names.
+- **B13 — Units, not runs.** A command acts on units — *(demand, app)*, *(demand, suite)*,
+  *(demand, repo)* — and every unit ends **done**, **skipped** (out of reach, with the reason) or
+  **failed** (attempted and failed, with the reason). One unit never stops another. The command
+  ends with a summary listing every non-done unit.
+- **B14 — One exit contract.** `0` all done · `3` nothing failed, something skipped or nothing to
+  do · `1` something failed · `2` usage or configuration error, nothing attempted.
+- **B15 — `--dry-run` everywhere.** It resolves the same units, prints what would be done to each,
+  changes nothing, and never claims an outcome it cannot know.
+- **B16 — Nothing destructive by surprise.** Nothing replaces a running artifact before the new one
+  has been verified present and non-empty. Nothing deletes a report run.
+
+## 5. What the commands are
+
+| Command | Units | What it does |
+|---|---|---|
+| `dop env up` | shared services | Creates/updates the shared namespace (reports, Allure). Idempotent. |
+| `dop up --tasks K… [--app]` | (demand, app) | Creates the demand's namespace with its config and the workloads of its applications (B9), from the workspace's manifests. Idempotent. |
+| `dop build [--tasks] [--app]` | (demand, app) | Builds each application's artifact **in the demand's worktree**, in a build container on the host (the cluster cannot see the worktree). |
+| `dop deploy [--tasks] [--app]` | (demand, app) | Copies the built artifact into the node (B6) and makes the workload serve it (back-ends restart; front-ends serve the new files). An absent or empty artifact fails the unit and replaces nothing. |
+| `dop down --tasks K…` | demand | Deletes the namespace and the copied artifacts. Requires `--tasks`. |
+| `dop status [--tasks] [--app]` | (demand, app) | Readiness and address of every workload; a cluster that cannot be read fails the units, never reports them "down". |
+| `dop log [--tasks] [--app]` | (demand, app) | Logs of the scope; follows by default. |
+| `dop test aaa\|it [--tasks] [--repo]` | (demand, repo) | Unit / integration tests on the **demand's worktree**, in a runner container on the host (the test project is mounted so that its source path resolves to the demand's worktree). Integration tests get Docker for Testcontainers. |
+| `dop test e2e [--tasks] [--app] [-k]` | (demand, suite) | Playwright against the **demand's own running applications** (B3 addresses). Suites belong to apps in config. |
+| `dop report [--tasks]` | — | Prints the reports address; every test run publishes to its demand's report, keeping every previous run. |
+
+## 6. Configuration
+
+The workspace declares, in one file: the cluster (context name, load-balancer node container), the
+address scheme (domain, port, namespace prefix), the manifests directory, the env file, the
+applications (name, repository, kind back-end/front-end, artifact directory inside the worktree,
+build image and command, e2e suite) and the runner images. An unknown key, a missing required key,
+an application naming an unknown repository, or a duplicated name is a configuration error (exit
+2). Nothing in the tool names an Optum application.
+
+## 7. What `dop` does not do
+
+No governance (§1). No database. No Docker Compose. No inference of a demand. No port per service.
+No deletion of history. No knowledge of any particular application.
+
+---
+
+## 8. Rules added after review (v2, 28/09) — binding, they amend §2–§6
+
+**Wiring**
+- **B17 — Front-end bundles are addressed at build time.** Each front-end declares in config the
+  build variables that carry back-end addresses and which app each one points at. `build` sets
+  them to that app's address in the demand (B3) when the app is in the demand, else to the app's
+  declared fallback. After building, the bundle is scanned for the addresses config declares as
+  forbidden (e.g. `localhost:8090`); a hit fails the unit.
+- **B18 — Back-ends are wired in the namespace.** Config declares, per back-end, the environment
+  keys that carry another app's address. `up` writes them into the demand's config: the
+  in-namespace Service when the callee is in the demand, else its fallback. The tool names no key.
+- **B19 — Companions.** A demand's apps (B9) are its worktree apps **plus** the companions config
+  declares for them (a back-end's front-end, a front-end's back-end). A companion is built from the
+  **main checkout**, labelled `source=trunk`, and shown as such by `status`. A demand with no app is
+  skipped with the reason; no namespace is created.
+- **B20 — Schedulers are off in a demand** unless config switches them on for that app. Config
+  declares, per app, the environment that turns scheduling off; an app with none declared is shown
+  by `status` as "scheduler not controllable".
+
+**Where things run**
+- **B21 — Runners run on the host.** `build`, `test aaa|it|e2e` run in containers on the host, never
+  in the cluster. The e2e runner uses the host network and is given, per hostname it needs, an
+  explicit `127.0.0.1` mapping; every address a suite reads comes from config templates rendered
+  with the scheme — no default in any suite may be relied on.
+- **B22 — Tests use the demand's test code and their own build directory.** The test tree is the
+  demand's worktree of the workspace repository when it has one, else the main checkout. Each
+  (demand, repo) test project is copied to `<workspace>/.dop/runs/<DEMAND>/<layer>-<repo>/` and run
+  there with the demand's worktree mounted at the path its source root expects. `it` units report
+  that they test the test project's own code (their poms have no application source root).
+
+**Reports**
+- **B23 — Reports live on the host.** Results are written under the workspace's report directory
+  on the host, per demand, per run; nothing prunes them. After each run `dop` regenerates that
+  demand's report on the host and copies the static site into the node, where the shared
+  `reports` service (nginx) serves it at `reports.<domain>:<port>`. The in-cluster Allure API
+  service is not used.
+
+**Deploy and safety**
+- **B24 — Deploy replaces contents, not directories.** The artifact is staged inside the node, then
+  the mounted directory's contents are made exactly equal to it (stale files removed); the
+  directory itself is never swapped. A back-end unit is done when its rollout finished and the new
+  pod is Ready; a front-end unit when the files are in place.
+- **B25 — Every cluster call names the context.** The configured context is passed on every call;
+  the current context is never read. A context that does not exist is exit 2.
+- **B26 — `dop` owns only what it labelled.** Demand namespaces carry `app.kubernetes.io/managed-by=dop`
+  and `dop/demand=<KEY>`. Discovery (B11) and `down` act only on those; anything else fails the unit.
+- **B27 — One writer per unit.** A unit is locked (`<workspace>/.dop/locks/`) while a command acts
+  on it; a second command on the same unit fails that unit naming the holder.
+
+**Precision**
+- **B28 — Token.** The key matches a branch case-insensitively, as a token delimited by the start,
+  the end, or one of `/ - _ .`. A worktree whose path no longer exists fails the unit naming it.
+- **B29 — `--repo`** narrows test units by repository. A repository with no test project for the
+  layer is skipped with that reason.
+- **B30 — Secrets.** Application and e2e credentials come from the workspace env file, by keys
+  config names; they reach the cluster as a Secret and are never printed, logged or put in a
+  report.
+
+**Cut from today, recorded:** none of B17–B30 is cut. Out of scope: parallel `env up` on two
+machines; a cluster recreated with a host mount (R5, deferred by the manager).
