@@ -234,6 +234,19 @@ class _Parser:
             out[k] = v
         return out
 
+    def path_map(self, value: Any, where: str) -> dict[str, str]:
+        """Container absolute path -> host path (B36)."""
+        if not isinstance(value, dict):
+            raise self.fail(where, "must be a table of strings")
+        out: dict[str, str] = {}
+        for k, v in value.items():
+            if not k.startswith("/"):
+                raise self.fail(where, f"{k!r} must be an absolute path in the container")
+            if not isinstance(v, str) or not v:
+                raise self.fail(f"{where}.{k}", "must be a host path")
+            out[k] = v
+        return out
+
     def rel_path(self, value: Any, where: str) -> str:
         s = self.string(value, where)
         p = Path(s)
@@ -337,7 +350,7 @@ class _Parser:
             image=self.string(b["image"], f"{w}.build.image"),
             command=command,
             env=self.str_map(b.get("env", {}), f"{w}.build.env"),
-            credentials=self.str_map(b.get("credentials", {}), f"{w}.build.credentials"),
+            credentials=self.path_map(b.get("credentials", {}), f"{w}.build.credentials"),
         )
 
         calls_raw = t.get("calls", [])
