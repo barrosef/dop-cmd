@@ -67,6 +67,19 @@ if [ ! -e index.html ] && [ ! -L index.html ]; then
 fi
 """
 
+# $1 = validated staging dir, $2 = destination dir. Creates the destination if absent, then copies
+# every top-level file (or symlink) of the staging into it, overwriting only entries of the same
+# name; a directory already there under a different name -- another published project -- is never
+# looked at, let alone removed (B16 amended, B44). Used to lay a landing page's own files down
+# beside the project directories `sync` publishes.
+_PUT_SCRIPT = r"""
+set -eu
+src="$1"; dest="$2"
+""" + _GUARD_DEST + r"""
+find "$src" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -exec cp -a -P -- {} . \;
+find . -mindepth 1 -maxdepth 1 -type f -exec chmod a+r -- {} +
+"""
+
 
 class NodeError(Exception):
     """A copy into the node failed; the destination was not touched unless stated."""
@@ -156,6 +169,18 @@ class Node:
         dest = self._inside_root(dest_dir_in_node)
         with self._staged(src_dir_on_host, dest) as staging:
             self._exec(_SEED_SCRIPT, staging, dest)
+
+    def put(self, src_dir_on_host: Path | str, dest_dir_in_node: str) -> None:
+        """Create `dest_dir_in_node` if absent, then copy `src_dir_on_host`'s top-level files into
+        it, overwriting only entries of the same name (B44): whatever else is already there --
+        a project directory `sync` published, another file -- is left exactly as it was.
+
+        The whole source is staged in the node and validated before the destination is touched,
+        same as `sync`/`seed` (B16, D3). Dry-run checks the source and prints the rest.
+        """
+        dest = self._inside_root(dest_dir_in_node)
+        with self._staged(src_dir_on_host, dest) as staging:
+            self._exec(_PUT_SCRIPT, staging, dest)
 
     def remove(self, dir_in_node: str) -> None:
         """Delete a directory under node_root (down, B10). Refuses anything outside it."""

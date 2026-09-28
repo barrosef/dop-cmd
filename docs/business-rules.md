@@ -93,7 +93,7 @@ reads is `git worktree list` (where a demand's code is) and, for a companion's l
 | `dop log [--tasks] [--app]` | (demand, app) | Logs of the scope; follows by default. |
 | `dop test aaa\|it [--tasks] [--repo]` | (demand, repo) | Unit / integration tests on the **demand's worktree**, in a runner container on the host (the test project is mounted so that its source path resolves to the demand's worktree). Integration tests get Docker for Testcontainers. |
 | `dop test e2e [--tasks] [--app] [-k]` | (demand, suite) | Playwright against the **demand's own running applications** (B3 addresses). Suites belong to apps in config. |
-| `dop report [--tasks]` | — | Prints the reports address; every test run publishes to its demand's report, keeping every previous run. |
+| `dop report [--tasks] [--publish]` | — | Prints the reports address; every test run publishes to its demand's report, keeping every previous run. |
 
 ## 6. Configuration
 
@@ -273,3 +273,15 @@ serialized (known, not handled today). Reports are synced to
 - **B36 amended (secret environment).** A build may also declare `build.secret_env = ["KEY", …]`:
   those host environment variables are passed into the build container by name only — never on the
   command line, never printed; a missing one fails the unit naming the key.
+- **B44 — `dop report --publish` copies already-generated report sites into the shared `reports`
+  service (B23).** Every top-level directory under the workspace's report root that holds its own
+  `index.html` is one published project site (`aaa-<repo>`, `it-<repo>`, `e2e-<suite>`); each is
+  copied whole, one `Node.sync` per project, into its own name under the node's `reports` directory
+  — exact content, never touching another project's entry or a raw per-demand results directory
+  (no `index.html` of its own, so never published). The hand-written landing page — whatever plain
+  files sit at the report root beside those directories, its `index.html` and the screenshots it
+  references — is staged on its own and written into the node's `reports` directory overwriting
+  only files of the same name; nothing already there, including a project's directory, is ever
+  removed. Each project and the landing page succeed or fail independently. `--publish` takes no
+  lock (B27 amended: `report` is read-only). `--dry-run` lists what would be copied, with size, and
+  writes nothing (B38).
