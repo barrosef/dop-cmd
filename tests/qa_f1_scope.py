@@ -16,7 +16,7 @@ import pytest
 from dop.config import load
 from dop.context import demand_key
 from dop.outcome import UsageError
-from dop.render import render_demand
+from dop.render import plan_demand, render_demand
 from dop.scope import branch_matches, resolve
 from dop.verbs import registry
 
@@ -154,6 +154,9 @@ def test_b8_repo_dir_that_is_not_a_repo_is_not_the_workspace_repo(root, realgit)
 
 
 def test_b31_companion_label_names_another_demands_branch(root, realgit):
+    # amended v4 (B8): the main checkout is never a demand's worktree, whatever its branch — it is
+    # only ever the companion source (B31), labelled with its real branch. K-9 itself has no
+    # worktree anywhere (be's main checkout on feat/K-9 does not count), architect 28/09
     """Real-workspace shape: repos/optum-support-be main checkout is ON feat/SUOPT-3419, so a
     demand that needs it as a companion gets another demand's code. B31 requires the label to say
     so — it does (this is green; the sharing itself is reported to the lead as a rule gap)."""
@@ -163,9 +166,11 @@ def test_b31_companion_label_names_another_demands_branch(root, realgit):
     ws = load(root)
     k9 = resolve(make_ctx(ws, tasks=["K-9"]), VERBS["up"])
     k2 = resolve(make_ctx(ws, tasks=["K-2"]), VERBS["up"])
-    be9 = next(u for u in k9.units if u.name == "be")
+    assert not any(u.name == "be" for u in k9.units), (
+        "be's main checkout on feat/K-9 must not count as K-9's own worktree (B8 amended)"
+    )
+    assert any(r.reason and "no application" in r.reason for r in k9.skipped), k9.skipped
     be2 = next(u for u in k2.units if u.name == "be")
-    assert be9.source == "worktree" and be9.path == root / "repos/be"
     assert be2.source == "trunk" and be2.path == root / "repos/be"
     assert be2.ref.startswith("feat/K-9@")
 
@@ -175,12 +180,15 @@ def test_b31_companion_label_names_another_demands_branch(root, realgit):
 
 
 def _overlay(root: Path, demand: str):
+    # amended v4 (B38/B39): dry-run writes nothing anywhere, so these read the overlay a REAL `up`
+    # left behind. `kustomization.yaml` persists (render.write); `secret.env` does not — it is
+    # transient (B39), gone by the time the CLI returns. Callers that need the secret keys go
+    # through `render.plan_demand()` instead, architect 28/09
     out = root / ".dop" / "overlays" / demand
     k = json.loads((out / "kustomization.yaml").read_text())
     cms = {json.loads(p["patch"])["metadata"]["name"]: json.loads(p["patch"])["data"]
            for p in k["patches"] if p["target"]["kind"] == "ConfigMap"}
-    secret_keys = [l.split("=", 1)[0] for l in (out / "secret.env").read_text().splitlines() if l]
-    return cms, secret_keys
+    return cms
 
 
 @pytest.fixture
@@ -194,11 +202,13 @@ def k1_full(root, fake):
 
 
 def test_b12_up_without_app_wires_be_to_the_demands_api(k1_full, fake):
-    code, out = run_cli(k1_full, "--dry-run", "up", "--tasks", "K-1")
-    cms, secret = _overlay(k1_full, "K-1")
+    # amended v4 (B38): --dry-run writes nothing (nowhere to inspect on disk); a REAL `up` is run
+    # instead, and the ConfigMap wiring is read from the overlay it leaves behind, architect 28/09
+    code, out = run_cli(k1_full, "up", "--tasks", "K-1")
+    assert code == 0, out
+    cms = _overlay(k1_full, "K-1")
     assert cms["optum-urls"]["API_URL"] == "http://api:8082"
     assert cms["optum-env"] == {"SCHEDULING_ENABLED": "false"}
-    assert set(secret) == {"DB_PASSWORD", "MAIL_PASSWORD"}
 
 
 def test_b12_up_app_narrowing_keeps_be_wired_to_the_demands_api(k1_full, fake):
@@ -206,25 +216,50 @@ def test_b12_up_app_narrowing_keeps_be_wired_to_the_demands_api(k1_full, fake):
     FILTERED units only: api is still in the demand (and still running in the namespace), but
     be's API_URL is rewritten to the remote fallback. Applied, it points the demand's be at the
     remote api on its next restart. Narrowing chose which apps to act on; it changed the wiring."""
-    run_cli(k1_full, "--dry-run", "up", "--tasks", "K-1", "--app", "be")
-    cms, _ = _overlay(k1_full, "K-1")
+    # amended v4 (B38): real run, not --dry-run — see test above, architect 28/09
+    code, out = run_cli(k1_full, "up", "--tasks", "K-1", "--app", "be")
+    assert code == 0, out
+    cms = _overlay(k1_full, "K-1")
     assert cms["optum-urls"]["API_URL"] == "http://api:8082"
 
 
 def test_b12_up_app_narrowing_keeps_schedulers_off(k1_full, fake):
     """DEFECT (B12, B20). The same narrowing drops api's scheduler_off from optum-env; applied,
     the base optum-env comes back and api's schedulers are on after its next restart."""
-    run_cli(k1_full, "--dry-run", "up", "--tasks", "K-1", "--app", "be")
-    cms, _ = _overlay(k1_full, "K-1")
+    # amended v4 (B38): real run, not --dry-run — see first test in this group, architect 28/09
+    code, out = run_cli(k1_full, "up", "--tasks", "K-1", "--app", "be")
+    assert code == 0, out
+    cms = _overlay(k1_full, "K-1")
     assert cms.get("optum-env") == {"SCHEDULING_ENABLED": "false"}
 
 
 def test_b12_up_app_narrowing_keeps_the_demands_secret(k1_full, fake):
     """DEFECT (B12, B30). `up --app fe` (a front-end, no secrets) renders an EMPTY secret.env;
     applied, the demand's Secret optum-app-secrets loses every key its back-ends read."""
-    run_cli(k1_full, "--dry-run", "up", "--tasks", "K-1", "--app", "fe")
-    _, secret = _overlay(k1_full, "K-1")
-    assert set(secret) == {"DB_PASSWORD", "MAIL_PASSWORD"}
+    # amended v4 (B38/B39): --dry-run leaves nothing to inspect; a real run's secret.env is gone
+    # by the time the CLI returns (transient, B39). What must hold is B37: render is always the
+    # WHOLE demand regardless of --app, so plan_demand() over the demand's full app set — the same
+    # computation `up` ran internally — must still carry every back-end secret key; and neither the
+    # key names nor the values may ever have reached kubectl's argv or dop's own stdout (B30).
+    # architect 28/09
+    ws = load(k1_full)
+    scope = resolve(make_ctx(ws, tasks=["K-1"], apps=["fe"]), VERBS["up"])
+    every_app = scope.demand_apps["K-1"]
+    code, out = run_cli(k1_full, "up", "--tasks", "K-1", "--app", "fe")
+    assert code == 0, out
+
+    plan = plan_demand(ws, "K-1", every_app)
+    assert {line.split("=", 1)[0] for line in plan.secret.splitlines() if line} == {
+        "DB_PASSWORD", "MAIL_PASSWORD",
+    }
+
+    secret_file = k1_full / ".dop" / "overlays" / "K-1" / "secret.env"
+    assert not secret_file.exists(), "secret.env must not remain after a real apply (B39)"
+    assert "s3cret-db" not in out and "s3cret-mail" not in out
+    for call in fake.log("kubectl"):
+        joined = " ".join(call)
+        assert "s3cret-db" not in joined and "s3cret-mail" not in joined
+        assert "DB_PASSWORD=" not in joined and "MAIL_PASSWORD=" not in joined
 
 
 def test_b12_app_outside_the_demand_is_not_silent(k1_full, fake):

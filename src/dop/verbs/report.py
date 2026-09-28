@@ -4,7 +4,7 @@ from ..address import address
 from ..context import Context
 from ..outcome import Unit, UnitResult, done, skipped
 from ..scope import resolve
-from . import RunSummary, VerbSpec, act, summary_from
+from . import RunSummary, VerbSpec, read, summary_from
 
 VERB = VerbSpec(
     name="report",
@@ -18,7 +18,7 @@ def run(ctx: Context) -> RunSummary:
     scope = resolve(ctx, VERB)
     summary = summary_from(scope)
     for unit in scope.units:
-        summary.add(act(ctx, unit, lambda u=unit: _report(ctx, u)))
+        summary.add(read(ctx, unit, lambda u=unit: _report(ctx, u)))
     return summary
 
 
@@ -33,5 +33,5 @@ def _report(ctx: Context, unit: Unit) -> UnitResult:
         return skipped(unit, "no report generated yet")
     base = address(ctx.ws, None, "reports")
     for project in projects:
-        print(f"{base}/{demand}/{project}/site/", file=ctx.out)
+        print(f"{base}/{demand}/{project}/", file=ctx.out)
     return done(unit, f"{len(projects)} project(s)")

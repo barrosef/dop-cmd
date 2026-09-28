@@ -103,32 +103,149 @@ def test_node_refuses_paths_outside_root(ws, fake):
     assert fake.log("docker") == []
 
 
-SYNC_SH = pytest.mark.skipif(not os.path.exists("/bin/sh"), reason="needs /bin/sh")
+# The in-node scripts delete things. They are NEVER run on the host: only inside a throwaway
+# container of the node's own image (BusyBox sh, GNU cp/find), read-only root, no network, every
+# writable path a tmpfs that dies with it. No docker or no image: skipped.
+NODE_IMAGE = "rancher/k3s:v1.35.5-k3s1"
 
 
-@SYNC_SH
-def test_sync_script_makes_contents_exactly_equal(tmp_path):
-    """The in-node script, run locally: stale entries go, type changes are handled, the directory
-    itself (its inode) stays."""
+def _node_image_available() -> bool:
+    try:
+        return subprocess.run(["docker", "image", "inspect", NODE_IMAGE],
+                              capture_output=True).returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+IN_SANDBOX = pytest.mark.skipif(not _node_image_available(), reason=f"needs docker and {NODE_IMAGE}")
+
+
+def _sandbox(setup: str, script: str, *args: str, after: str = "") -> subprocess.CompletedProcess:
+    """setup; then `script` with positional args; then `after` — all in one sandboxed container.
+    Prints `rc=<script's exit>` between the script and `after`."""
+    driver = f'{setup}\nsh -c "$DOP_SCRIPT" sh "$@"; echo "rc=$?"\n{after}\n'
+    return subprocess.run(
+        ["docker", "run", "--rm", "--network", "none", "--read-only",
+         "--tmpfs", "/workspace", "--tmpfs", "/outside", "-e", f"DOP_SCRIPT={script}",
+         "--entrypoint", "/bin/sh", NODE_IMAGE, "-c", driver, "sh", *args],
+        capture_output=True, text=True, timeout=60)
+
+
+@IN_SANDBOX
+def test_sync_script_makes_contents_exactly_equal():
+    """Stale entries go, type changes are handled, the directory itself (its inode) stays."""
     from dop.node import _SYNC_SCRIPT
 
-    src, dest = tmp_path / "src", tmp_path / "dest"
-    (src / "assets").mkdir(parents=True)
-    (src / "index.html").write_text("new")
-    (src / "assets" / "a.js").write_text("a")
-    (src / "was-file").mkdir()
-    (src / "was-file" / "x").write_text("x")
-    (dest / "assets").mkdir(parents=True)
-    (dest / "index.html").write_text("old")
-    (dest / "stale.js").write_text("s")
-    (dest / "assets" / "stale.js").write_text("s")
-    (dest / "was-file").write_text("f")
-    inode = dest.stat().st_ino
-    subprocess.run(["sh", "-c", _SYNC_SCRIPT, "sh", str(src), str(dest)], check=True)
-    got = sorted(str(p.relative_to(dest)) for p in dest.rglob("*"))
-    assert got == ["assets", "assets/a.js", "index.html", "was-file", "was-file/x"]
-    assert (dest / "index.html").read_text() == "new"
-    assert dest.stat().st_ino == inode
+    setup = r"""
+    set -e
+    mkdir -p /workspace/st/assets /workspace/st/was-file /workspace/d/assets
+    echo new > /workspace/st/index.html; echo a > /workspace/st/assets/a.js; echo x > /workspace/st/was-file/x
+    echo old > /workspace/d/index.html; echo s > /workspace/d/stale.js; echo s > /workspace/d/assets/stale.js
+    echo f > /workspace/d/was-file
+    stat -c 'inode=%i' /workspace/d
+    set +e
+    """
+    after = r"""stat -c 'inode=%i' /workspace/d
+    cd /workspace/d && find . -mindepth 1 | sort | tr '\n' ' '; echo; cat index.html"""
+    proc = _sandbox(setup, _SYNC_SCRIPT, "/workspace/st", "/workspace/d", after=after)
+    out = proc.stdout.splitlines()
+    assert "rc=0" in out, proc.stderr
+    inodes = [line for line in out if line.startswith("inode=")]
+    assert len(inodes) == 2 and inodes[0] == inodes[1]
+    assert "./assets ./assets/a.js ./index.html ./was-file ./was-file/x " in out
+    assert out[-1] == "new"
+
+
+@IN_SANDBOX
+def test_sync_script_never_parses_names_nor_follows_symlinks():
+    """D1/D2: names with a newline, a leading dash or a glob are removed as themselves; symlinks in
+    the destination are removed as links, never followed; symlinks in the artifact are copied as
+    links. Nothing outside the destination changes."""
+    from dop.node import _SYNC_SCRIPT
+
+    setup = r"""
+    set -e
+    mkdir -p /workspace/st/assets /workspace/d/assets
+    echo keep > /outside/keep; mkdir /outside/sub; echo keep > /outside/sub/f
+    echo new > /workspace/st/index.html; ln -s ../index.html /workspace/st/assets/link
+    nl='
+'
+    touch "/workspace/d/evil${nl}..${nl}outside" /workspace/d/-rf "/workspace/d/ *"
+    ln -s /outside /workspace/d/assets/out; ln -s /outside/keep /workspace/d/index.html
+    ln -s /outside /workspace/d/stale
+    set +e
+    """
+    after = r"""cd /workspace/d && find . -mindepth 1 | sort | tr '\n' ' '; echo
+    readlink /workspace/d/assets/link; find /outside | sort | tr '\n' ' '; echo; cat /outside/keep"""
+    proc = _sandbox(setup, _SYNC_SCRIPT, "/workspace/st", "/workspace/d", after=after)
+    out = proc.stdout.splitlines()
+    assert "rc=0" in out, proc.stderr
+    assert "./assets ./assets/link ./index.html " in out
+    assert "../index.html" in out
+    assert "/outside /outside/keep /outside/sub /outside/sub/f " in out
+    assert out[-1] == "keep"
+
+
+@IN_SANDBOX
+@pytest.mark.parametrize("dest", ["/workspace/dl", "/workspace/anc/app"])
+def test_sync_script_refuses_a_destination_reached_through_a_symlink(dest):
+    from dop.node import _SYNC_SCRIPT
+
+    setup = r"""
+    mkdir -p /workspace/st; echo new > /workspace/st/index.html; echo keep > /outside/keep
+    ln -s /outside /workspace/dl; ln -s /outside /workspace/anc
+    """
+    proc = _sandbox(setup, _SYNC_SCRIPT, "/workspace/st", dest, after="ls /outside")
+    out = proc.stdout.splitlines()
+    assert "rc=0" not in out
+    assert "resolves elsewhere" in proc.stderr
+    assert out[-1] == "keep"
+
+
+@IN_SANDBOX
+def test_check_staged_rejects_a_file_less_tree():
+    from dop.node import _CHECK_STAGED
+
+    proc = _sandbox("mkdir -p /workspace/e/sub /workspace/f/sub; echo x > /workspace/f/sub/a",
+                    _CHECK_STAGED, "/workspace/e", after=r"""sh -c "$DOP_SCRIPT" sh /workspace/f""")
+    out = proc.stdout.splitlines()
+    assert out[0] == "rc=1" and out[1] == "sub"
+
+
+@IN_SANDBOX
+def test_seed_script_creates_the_page_only_where_there_is_none():
+    """D7: env up's seed never removes nor overwrites what is already served."""
+    from dop.node import _SEED_SCRIPT
+
+    setup = r"""
+    mkdir -p /workspace/sd /workspace/rep/K-1/aaa; echo placeholder > /workspace/sd/index.html
+    echo published > /workspace/rep/index.html; echo r > /workspace/rep/K-1/aaa/x
+    """
+    after = r"""cat /workspace/rep/index.html; ls /workspace/rep/K-1/aaa
+    sh -c "$DOP_SCRIPT" sh /workspace/sd /workspace/new/reports && cat /workspace/new/reports/index.html"""
+    proc = _sandbox(setup, _SEED_SCRIPT, "/workspace/sd", "/workspace/rep", after=after)
+    assert proc.stdout.splitlines() == ["rc=0", "published", "x", "placeholder"], proc.stderr
+
+
+def test_sync_file_less_source_touches_nothing(ws, fake, tmp_path):
+    """Only empty directories: nothing to serve, nothing sent to the node (B16)."""
+    (tmp_path / "target" / "classes").mkdir(parents=True)
+    with pytest.raises(NodeError, match="empty"):
+        Node(ws, dry_run=False, out=io.StringIO()).sync(tmp_path / "target", "/workspace/optum-k-1/api")
+    assert fake.log("docker") == []
+
+
+def test_seed_stages_then_runs_the_seed_script_not_the_sync(ws, fake, tmp_path):
+    from dop.node import _SEED_SCRIPT
+
+    src = tmp_path / "seed"
+    src.mkdir()
+    (src / "index.html").write_text("x")
+    Node(ws, dry_run=False, out=io.StringIO()).seed(src, "/workspace/optum-shared/reports")
+    calls = fake.log("docker")
+    assert [c[0] for c in calls] == ["exec", "cp", "exec", "exec", "exec"]
+    assert calls[3][-4:] == [_SEED_SCRIPT, "sh", calls[0][-1], "/workspace/optum-shared/reports"]
+    assert "rm " not in _SEED_SCRIPT
 
 
 # -- lock ---------------------------------------------------------------------------------------

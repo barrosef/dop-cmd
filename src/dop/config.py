@@ -7,6 +7,7 @@ exit 2, nothing attempted. Nothing here names an application.
 
 from __future__ import annotations
 
+import posixpath
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -22,6 +23,20 @@ _ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _URL_REF = re.compile(r"\{url:([^}]*)\}")
 
 KINDS = ("backend", "frontend")
+
+# The build container's own layout (build.py): the workdir a worktree/companion is mounted at, and
+# where the shared Maven cache mounts (under HOME=/tmp so a non-root --user can write to it, D9/B42).
+# A credential (B36) may not land inside either (B43) — config is the single source for both paths
+# so build.py and this confinement check never drift apart.
+BUILD_WORKDIR = "/work"
+MAVEN_CACHE_PATH = "/tmp/.m2"
+
+
+def _confined(container_path: str, under: str) -> bool:
+    """True when `container_path` is `under` or inside it (B43)."""
+    p = posixpath.normpath(container_path)
+    u = posixpath.normpath(under)
+    return p == u or p.startswith(u + "/")
 
 
 @dataclass(frozen=True)
@@ -71,6 +86,9 @@ class Call:
     app: str
     key: str
     fallback: str
+    # "service" (in-namespace, default) or "browser" — for addresses handed to a person, e.g. links
+    # in an e-mail (B18).
+    form: str = "service"
 
 
 @dataclass(frozen=True)
@@ -235,16 +253,24 @@ class _Parser:
         return out
 
     def path_map(self, value: Any, where: str) -> dict[str, str]:
-        """Container absolute path -> host path (B36)."""
+        """Container absolute path -> host path (B36, B43). The container path may not lie inside
+        the build directory or the Maven cache; the host path is expanded (`~`) and, when not
+        already absolute, resolved against the workspace root like every other path in this file —
+        never against the process's cwd."""
         if not isinstance(value, dict):
             raise self.fail(where, "must be a table of strings")
         out: dict[str, str] = {}
         for k, v in value.items():
             if not k.startswith("/"):
                 raise self.fail(where, f"{k!r} must be an absolute path in the container")
-            if not isinstance(v, str) or not v:
+            if _confined(k, BUILD_WORKDIR) or _confined(k, MAVEN_CACHE_PATH):
+                raise self.fail(where, f"{k!r} may not lie inside the build directory or the Maven cache (B43)")
+            if not isinstance(v, str) or not v.strip():
                 raise self.fail(f"{where}.{k}", "must be a host path")
-            out[k] = v
+            host = Path(v).expanduser()
+            if not host.is_absolute():
+                host = self.root / host
+            out[k] = str(host)
         return out
 
     def rel_path(self, value: Any, where: str) -> str:
@@ -265,8 +291,9 @@ class _Parser:
 
         c = self.table(data["cluster"], "[cluster]", ("context", "node", "node_root"))
         node_root = self.string(c["node_root"], "cluster.node_root")
-        if not node_root.startswith("/") or node_root.rstrip("/") == "":
-            raise self.fail("cluster.node_root", "must be an absolute path other than /")
+        segments = [p for p in node_root.split("/") if p]
+        if not node_root.startswith("/") or not segments or any(p in (".", "..") for p in segments):
+            raise self.fail("cluster.node_root", "must be a clean absolute path other than / (no '.' or '..' segment, D19)")
         cluster = Cluster(
             context=self.string(c["context"], "cluster.context"),
             node=self.string(c["node"], "cluster.node"),
@@ -359,11 +386,14 @@ class _Parser:
         calls = []
         for i, c in enumerate(calls_raw):
             cw = f"{w}.calls[{i}]"
-            c = self.table(c, cw, ("app", "key", "fallback"))
+            c = self.table(c, cw, ("app", "key", "fallback"), ("form",))
+            form = self.string(c.get("form", "service"), f"{cw}.form")
+            if form not in ("service", "browser"):
+                raise self.fail(f"{cw}.form", "must be 'service' or 'browser'")
             key = self.string(c["key"], f"{cw}.key")
             if not _ENV_KEY.match(key):
                 raise self.fail(f"{cw}.key", f"{key!r} is not a valid variable name")
-            calls.append(Call(self.string(c["app"], f"{cw}.app"), key, self.string(c["fallback"], f"{cw}.fallback")))
+            calls.append(Call(self.string(c["app"], f"{cw}.app"), key, self.string(c["fallback"], f"{cw}.fallback"), form))
         dup = _first_duplicate([c.key for c in calls])
         if dup is not None:
             raise self.fail(f"{w}.calls", f"duplicated key {dup!r}")
@@ -426,6 +456,18 @@ class _Parser:
                         f"conflicts with apps.{seen[k][0]}.scheduler_off.{k}",
                     )
                 seen.setdefault(k, (app.name, v))
+
+        # calls keys land in one ConfigMap per namespace too (D19): two apps naming the same key
+        # for a different target app would silently overwrite one another there.
+        seen_calls: dict[str, tuple[str, str]] = {}
+        for app in apps.values():
+            for c in app.calls:
+                if c.key in seen_calls and seen_calls[c.key][1] != c.app:
+                    raise self.fail(
+                        f"apps.{app.name}.calls",
+                        f"key {c.key!r} conflicts with apps.{seen_calls[c.key][0]}.calls (different target app)",
+                    )
+                seen_calls.setdefault(c.key, (app.name, c.app))
 
 
 def _first_duplicate(items):

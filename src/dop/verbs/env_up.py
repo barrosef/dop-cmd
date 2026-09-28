@@ -2,9 +2,9 @@
 
 Applies the workspace's shared manifests (`<paths.manifests>/shared`) as one kustomization, and
 seeds the node directory the shared `reports` service serves (B23) so it exists even before any
-report has been published. Node has no bare "create a directory": a small placeholder page is
-synced in the same way `deploy` stages real artifacts (B6, B16, B24) — harmless to redo, so `env up`
-stays idempotent.
+report has been published: the directory is created if absent and a placeholder index.html is
+staged in only when it has none — published reports are never touched (B16), so `env up` stays
+idempotent. Dry-run writes nothing, not even the host-side placeholder (B38).
 """
 
 from __future__ import annotations
@@ -26,10 +26,14 @@ _PLACEHOLDER = "<!doctype html><title>dop reports</title><p>no report published 
 
 
 def _seed_reports_dir(ctx: Context) -> None:
+    dest = ctx.node.path(ctx.ws.address.shared_namespace, _REPORTS_DIR)
+    if ctx.dry_run:
+        print(f"[dry-run] seed {dest}/index.html (placeholder) if it has none", file=ctx.out)
+        return
     staging = ctx.ws.state_dir / "seed" / _REPORTS_DIR
     staging.mkdir(parents=True, exist_ok=True)
     (staging / "index.html").write_text(_PLACEHOLDER, encoding="utf-8")
-    ctx.node.sync(staging, ctx.node.path(ctx.ws.address.shared_namespace, _REPORTS_DIR))
+    ctx.node.seed(staging, dest)
 
 
 def _run_one(ctx: Context, unit: Unit) -> UnitResult:

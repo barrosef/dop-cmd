@@ -70,14 +70,15 @@ def test_report_url_site_suffix_does_not_match_node_sync_destination(root, ws, f
     report_ctx = make_ctx(ws, tasks=["K-1"])
     _run(report_ctx, "report")
     printed = report_ctx.out.getvalue().strip()
-    assert printed == "http://reports.localhost:8080/K-1/aaa-api/site/", (
+    # D14 fixed: `report` no longer prints the host-side `/site` segment `node.sync` never
+    # creates at the destination -- the printed address is exactly what nginx serves.
+    assert printed == "http://reports.localhost:8080/K-1/aaa-api/", (
         f"sanity check on the printed URL format itself failed: {printed!r}"
     )
 
-    # THE DEFECT: the path `report` prints, translated into what nginx would actually be asked
-    # for, must equal where the content was actually placed on the node. It does not -- `report`
-    # prints an address with a trailing `/site/` that the node copy never created.
-    printed_path_after_host = printed.split("localhost:8080", 1)[1]  # "/K-1/aaa-api/site/"
+    # `report`'s path, translated into what nginx would actually be asked for, must equal where
+    # the content was actually placed on the node -- and now does.
+    printed_path_after_host = printed.split("localhost:8080", 1)[1]  # "/K-1/aaa-api/"
     served_path = f"/optum-shared/reports{printed_path_after_host}".rstrip("/")
     node_path = node_dest[len("/workspace"):]  # "/optum-shared/reports/K-1/aaa-api"
     assert served_path == node_path, (

@@ -36,11 +36,10 @@ def _applied(calls, overlay=None) -> bool:
     return False
 
 
-def _deleted(calls, ns) -> bool:
-    for c in calls:
-        if c[-4:] == ["delete", "namespace", ns, "--ignore-not-found"]:
-            return True
-    return False
+def _deleted(calls, key) -> bool:
+    """B40: `down` deletes by dop's labels for the demand, never by the computed name."""
+    selector = f"app.kubernetes.io/managed-by=dop,dop/demand={key}"
+    return any(c[-4:] == ["delete", "namespace", "-l", selector] for c in calls)
 
 
 def _seed_manifests(ws, *apps: str) -> None:
@@ -79,6 +78,18 @@ def test_env_up_dry_run_changes_nothing(ws, fake):
     assert not _applied(_kubectl(fake))
     assert _docker(fake) == []
     assert "[dry-run]" in out
+    assert not (ws.state_dir / "seed").exists()  # B38: not even the host-side placeholder
+
+
+def test_env_up_seeds_never_syncs_the_reports_dir(ws, fake):
+    """D7: the seed may only add a missing index.html; the replacing sync would wipe published
+    reports."""
+    from dop.node import _SEED_SCRIPT, _SYNC_SCRIPT
+
+    (ws.paths.manifests / "shared").mkdir(parents=True)
+    run_cli(ws.root, "env", "up")
+    scripts = [c[4] for c in _docker(fake) if c[:1] == ["exec"]]
+    assert _SEED_SCRIPT in scripts and _SYNC_SCRIPT not in scripts
 
 
 # -- up (B10 enters, B18 wiring, B19 companions/zero-apps, B20/B32 scheduler out of my scope) ----
@@ -154,7 +165,7 @@ def test_down_deletes_namespace_and_node_dir(ws, fake):
     fake.present("K-1")
     code, out = run_cli(ws.root, "down", "--tasks", "K-1")
     assert code == 0
-    assert _deleted(_kubectl(fake), "optum-k-1")
+    assert _deleted(_kubectl(fake), "K-1")
     rm_calls = [c for c in _docker(fake) if c[:1] == ["exec"] and "rm -rf" in " ".join(c)]
     assert any(c[-1] == "/workspace/optum-k-1" for c in rm_calls)
 
@@ -171,7 +182,7 @@ def test_down_dry_run_changes_nothing(ws, fake):
     fake.present("K-1")
     code, out = run_cli(ws.root, "down", "--tasks", "K-1", "--dry-run")
     assert code == 0
-    assert not _deleted(_kubectl(fake), "optum-k-1")
+    assert not _deleted(_kubectl(fake), "K-1")
     assert _docker(fake) == []
 
 
@@ -188,7 +199,8 @@ def test_status_reports_not_deployed_and_address(ws, root, fake):
 def test_status_marks_the_companion_as_trunk(ws, root, fake):
     fake.present("K-1")
     fake.worktrees(root / "repos/be", (worktree_dir(root, "be", "K-1"), "K-1"))
-    code, out = run_cli(root, "status")
+    # dry-run: wiring is printed as expected, not checked against a live ConfigMap the fake lacks (B18)
+    code, out = run_cli(root, "--dry-run", "status")
     assert code == 0
     line = next(l for l in out.splitlines() if l.startswith("K-1/fe:"))
     assert "source: trunk (main@" in line
@@ -206,7 +218,7 @@ def test_status_of_an_unreadable_cluster_raises_for_act_to_fail_not_hide(ws):
     ctx = make_ctx(ws, tasks=["K-1"], apps=["solo"])
     ctx.kube = BrokenKube()
     with pytest.raises(KubeError):
-        status._run_one(ctx, Unit("app", "K-1", "solo"))
+        status._run_one(ctx, Unit("app", "K-1", "solo"), {"solo"})
 
 
 # -- log (follow only a single unit; several units are listed, not guessed; --no-follow dumps) --

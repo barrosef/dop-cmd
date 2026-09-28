@@ -17,5 +17,5 @@ def run(ctx: Context) -> RunSummary:
     scope = resolve(ctx, VERB)
     summary = summary_from(scope)
     for unit in scope.units:
-        summary.add(act(ctx, unit, lambda u=unit: run_repo_layer(ctx, u, "it")))
+        summary.add(act(ctx, unit, lambda u=unit: run_repo_layer(ctx, u, "it"), family="it"))
     return summary

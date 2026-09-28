@@ -82,6 +82,9 @@ def test_up_dry_run_does_not_leak_secret_values_to_disk(ws, root, fake):
 def test_up_dry_run_control_real_run_does_write_the_overlay(ws, root, fake):
     """Control for the two defects above: proves the assertion targets real behaviour, not a
     fixture quirk — a non-dry-run `up` is expected and correct to write the overlay."""
+    # amended v4 (B39): the secret file is transient — it exists only for the duration of the
+    # apply and is deleted afterwards, success or failure. A real run must leave the overlay
+    # skeleton (kustomization.yaml) but NOT secret.env behind. architect 28/09
     fake.present()
     fake.worktrees(root / "repos/be", (worktree_dir(root, "be", "K-1"), "K-1"))
     _seed_manifests(ws, "be", "fe")
@@ -91,7 +94,8 @@ def test_up_dry_run_control_real_run_does_write_the_overlay(ws, root, fake):
     assert code == 0
     overlay = ws.state_dir / "overlays" / "K-1"
     assert overlay.exists()
-    assert (overlay / "secret.env").exists()  # real run: this one is supposed to be there
+    assert (overlay / "kustomization.yaml").exists()  # real run: this one is supposed to be there
+    assert not (overlay / "secret.env").exists(), "secret.env must not outlive the apply (B39)"
 
 
 # =================================================================================================

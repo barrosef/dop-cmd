@@ -226,7 +226,10 @@ def test_report_prints_address_of_every_generated_project(ws, fake):
     summary = _run(ctx, "report")
     r = _one(summary)
     assert r.status is Status.DONE
-    assert ctx.out.getvalue().strip() == "http://reports.localhost:8080/K-1/aaa-api/site/"
+    # D14: the address `report` prints is where the node's `reports` service actually serves
+    # from (business-rules.md Step-2 choices: synced to `.../reports/<DEMAND>/<project>/`, no
+    # `/site` segment -- `node.sync` copies `site`'s *contents* straight there).
+    assert ctx.out.getvalue().strip() == "http://reports.localhost:8080/K-1/aaa-api/"
 
 
 def test_report_nothing_generated_is_skipped(ws, fake):

@@ -14,13 +14,18 @@ from .node import Node
 from .outcome import Unit, UsageError
 from .runner import Runner
 
-_DEMAND_KEY = re.compile(r"^[A-Za-z]+-\d+$")
+# ASCII only: `\d` would take any Unicode digit, and `$` a trailing newline (B7, D17).
+_DEMAND_KEY = re.compile(r"[A-Za-z]+-[0-9]+")
+# A key becomes a label value and a DNS label (B3, B4, B26); both stop at 63 characters.
+_LABEL_MAX = 63
 
 
 def demand_key(raw: str) -> str:
     """B7: a key as the operator gave it, validated and upper-cased."""
-    if not _DEMAND_KEY.match(raw):
+    if not _DEMAND_KEY.fullmatch(raw):
         raise UsageError(f"{raw!r} is not a demand key (expected like SUOPT-1530)")
+    if len(raw) > _LABEL_MAX:
+        raise UsageError(f"{raw!r} is longer than {_LABEL_MAX} characters; it cannot be a label (B4)")
     return raw.upper()
 
 

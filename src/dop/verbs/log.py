@@ -13,7 +13,7 @@ from ..address import namespace
 from ..context import Context
 from ..outcome import RunSummary, Unit, UnitResult, done, skipped
 from ..scope import resolve
-from . import Option, VerbSpec, act, summary_from
+from . import Option, VerbSpec, read, summary_from
 
 VERB = VerbSpec(
     name="log",
@@ -51,5 +51,5 @@ def run(ctx: Context) -> RunSummary:
             ))
         return summary
     for unit in scope.units:
-        summary.add(act(ctx, unit, lambda unit=unit: _run_one(ctx, unit, follow)))
+        summary.add(read(ctx, unit, lambda unit=unit: _run_one(ctx, unit, follow)))
     return summary

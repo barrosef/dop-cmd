@@ -11,10 +11,21 @@ from .outcome import UsageError
 
 _URL_REF = re.compile(r"\{url:([^}]*)\}")
 
+# Kubernetes names a namespace with one DNS label: at most 63 characters.
+NAME_MAX = 63
+
 
 def namespace(ws: Workspace, demand: str) -> str:
     """B4: `<prefix>-<demand>`, lower case."""
     return f"{ws.address.namespace_prefix}-{demand}".lower()
+
+
+def check_namespace(ws: Workspace, demand: str) -> None:
+    """A demand whose namespace can never exist is a usage error, before anything is attempted
+    (B4, B14)."""
+    ns = namespace(ws, demand)
+    if len(ns) > NAME_MAX:
+        raise UsageError(f"{demand}: namespace {ns} is longer than {NAME_MAX} characters")
 
 
 def host(ws: Workspace, demand: str | None, app: str) -> str:

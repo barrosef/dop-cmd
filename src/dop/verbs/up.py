@@ -1,10 +1,15 @@
-"""dop up — bring a demand into the environment (§5, B10, B18–B20, B26).
+"""dop up — bring a demand into the environment (§5, B10, B18–B20, B26, B37–B39).
 
 The demand's overlay (namespace, wiring, scheduler env, secret — render.py) is rendered and applied
-once per demand; every app of the demand (B9 + B19) is then one unit. `deploy` is what copies an
+once per demand, always from every app of the demand (B37): `--app` narrows which workloads are
+applied, never what the config says. Every app acted on is then one unit. `deploy` is what copies an
 artifact into the node (B6): a workload that has never been deployed has nothing to mount yet and
 stays ContainerCreating. That is not a failure here — the unit is done, noting that it waits for
 `dop deploy`.
+
+Dry-run renders nothing and writes nothing (B38): the overlay is computed — so what would fail
+still fails — and the apply printed. On a real run the secret file exists only while the apply
+runs (B39).
 """
 
 from __future__ import annotations
@@ -14,7 +19,7 @@ from collections import defaultdict
 from ..address import namespace
 from ..context import Context
 from ..outcome import RunSummary, Unit, UnitResult, done, failed, planned
-from ..render import render_demand
+from ..render import apply_selector, check_rendered, overlay_dir, plan_demand, rendered
 from ..scope import resolve
 from . import VerbSpec, act, summary_from
 
@@ -60,10 +65,17 @@ def run(ctx: Context) -> RunSummary:
         by_demand[unit.demand].append(unit)
 
     for demand, units in by_demand.items():
-        try:
-            overlay = render_demand(ctx.ws, demand, units)
-            ctx.kube.run(["apply", "-k", str(overlay)])
-        except Exception as exc:  # render or apply is shared by every app of the demand
+        every_app = scope.demand_apps.get(demand, units)
+        selector = apply_selector([u.name for u in every_app], [u.name for u in units])
+        try:  # render and apply are shared by every app of the demand
+            if ctx.dry_run:
+                plan_demand(ctx.ws, demand, every_app)
+                ctx.kube.run(["apply", "-k", str(overlay_dir(ctx.ws, demand)), *selector])
+            else:
+                with rendered(ctx.ws, demand, every_app) as overlay:
+                    check_rendered(ctx.kube.run(["kustomize", str(overlay)], read=True).stdout)
+                    ctx.kube.run(["apply", "-k", str(overlay), *selector])
+        except Exception as exc:
             summary.extend(failed(u, f"{type(exc).__name__}: {exc}") for u in units)
             continue
         for unit in units:

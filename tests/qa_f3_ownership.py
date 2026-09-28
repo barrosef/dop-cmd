@@ -126,11 +126,14 @@ def test_b26_namespace_managed_by_dop_core_is_refused(root, fake):
 
 
 def test_b26_down_deletes_exactly_the_demand_namespace_and_dir(root, fake):
+    # amended v4 (B40), architect 28/09
     fake.present("QA-1", "QA-2")
     code, _ = run_cli(root, "down", "--tasks", "QA-1")
     assert code == 0
     dels = _deletes(fake)
-    assert len(dels) == 1 and dels[0][-3:] == ["namespace", "optum-qa-1", "--ignore-not-found"]
+    assert len(dels) == 1 and dels[0][-3:] == [
+        "namespace", "-l", "app.kubernetes.io/managed-by=dop,dop/demand=QA-1",
+    ], dels
     rm = [c for c in fake.log("docker") if "rm -rf" in " ".join(c)]
     assert [c[-1] for c in rm] == ["/workspace/optum-qa-1"]
     assert all(c[1] == "k3d-test-server-0" for c in fake.log("docker"))
@@ -235,6 +238,19 @@ def _slow_kubectl(dirpath: Path) -> Path:
     return dirpath
 
 
+def _slow_kubectl_delete(dirpath: Path) -> Path:
+    """A kubectl on PATH ahead of the fake that sleeps on `delete namespace` (a slow teardown)."""
+    dirpath.mkdir(parents=True, exist_ok=True)
+    k = dirpath / "kubectl"
+    k.write_text(textwrap.dedent(f"""\
+        #!/bin/sh
+        case " $* " in *" delete namespace "*) sleep 6; exit 0;; esac
+        exec {FAKES / 'kubectl'} "$@"
+        """))
+    k.chmod(0o755)
+    return dirpath
+
+
 def _dop(root: Path, *argv: str, env) -> subprocess.Popen:
     return subprocess.Popen([sys.executable, "-c", "from dop.cli import entry; entry()",
                              "--workspace", str(root), *argv],
@@ -262,24 +278,26 @@ def test_b27_a_reader_following_logs_does_not_lock_writers_out(root, fake, tmp_p
 
 
 def test_b27_same_unit_two_processes_second_fails_naming_holder(root, fake, tmp_path):
+    # amended v4 (B27 amended): `log` is read-only now and takes no lock at all, so it can no
+    # longer be the unit under contention. `down` is a real writer — it holds the demand's lock
+    # for as long as its delete takes (B27 amended) — and replaces it here, architect 28/09
     """Cross-process: a unit held by a live process fails the second command, naming pid+command."""
     fake.present("QA-1")
-    fake.worktrees(root / "repos/solo", (worktree_dir(root, "solo", "QA-1"), "QA-1"))
     env = dict(os.environ)
-    env["PATH"] = f"{_slow_kubectl(tmp_path / 'slowbin')}:{env['PATH']}"
-    first = _dop(root, "log", "--tasks", "QA-1", "--app", "solo", env=env)
+    env["PATH"] = f"{_slow_kubectl_delete(tmp_path / 'slowbin')}:{env['PATH']}"
+    first = _dop(root, "down", "--tasks", "QA-1", env=env)
     try:
         deadline = time.time() + 5
         while not list((root / ".dop" / "locks").glob("*.lock")) and time.time() < deadline:
             time.sleep(0.05)
-        second = _dop(root, "log", "--tasks", "QA-1", "--app", "solo", "--no-follow", env=env)
+        second = _dop(root, "down", "--tasks", "QA-1", env=env)
         out, _ = second.communicate(timeout=30)
         assert second.returncode == 1
-        assert f"pid {first.pid}" in out and "log --tasks QA-1 --app solo" in out
+        assert f"pid {first.pid}" in out and "down --tasks QA-1" in out
     finally:
         first.kill(); first.wait()
     # the killed holder's lock is left behind; the next run breaks it and says so (B34)
-    code, out = run_cli(root, "log", "--tasks", "QA-1", "--app", "solo", "--no-follow")
+    code, out = run_cli(root, "down", "--tasks", "QA-1")
     assert code == 0 and f"broke stale lock of dead pid {first.pid}" in out
 
 

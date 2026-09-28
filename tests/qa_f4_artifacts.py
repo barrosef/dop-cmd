@@ -123,6 +123,7 @@ def test_b17_forbidden_address_in_source_map_is_found(ws, root, fake):
     wt = worktree_dir(root, "fe", "K-1")
     fake.worktrees(root / "repos/fe", (wt, "feature/K-1"))
     (wt / "dist" / "assets").mkdir(parents=True)
+    (wt / "dist" / "index.html").write_text("<html></html>")  # D8/B41: a valid artifact to scan
     (wt / "dist" / "assets" / "a.js.map").write_text('{"sourcesContent":["localhost:8090"]}')
 
     r = _result(build.run(make_ctx(ws, tasks=["K-1"], apps=["fe"])), "fe")
@@ -248,8 +249,12 @@ def test_b31_companion_rebuild_when_previous_build_left_unremovable_output(ws, r
     try:
         r = _result(build.run(make_ctx(ws, tasks=["K-1"], apps=["fe"])), "fe")
     finally:
-        os.chmod(dest, 0o755)
-    assert r.status is Status.DONE, f"second companion build failed: {r.reason}"
+        if dest.exists():  # only if the fix under test left it behind
+            os.chmod(dest, 0o755)
+    # The fake build produces no artifact, so B41 now fails the unit on "no index.html"; what this
+    # test guards is that the unremovable previous output no longer breaks the rebuild (architect, 28/09).
+    assert r.status is Status.DONE or r.reason.startswith("no index.html"), (
+        f"second companion build failed: {r.reason}")
 
 
 # == B36 — build credentials =====================================================================
@@ -305,15 +310,16 @@ def test_b36_credential_inside_the_build_directory_is_refused(root, container_pa
 
 
 def test_b36_backend_credential_inside_the_shared_maven_cache_is_refused(root):
-    """/root/.m2/settings.xml — the natural Maven credential path — lands inside the shared
-    dop-maven-cache volume; docker leaves an empty settings.xml there that breaks every other
+    """.m2/settings.xml — the natural Maven credential path, under the shared dop-maven-cache
+    volume's mount (config.MAVEN_CACHE_PATH: /tmp/.m2, under HOME=/tmp so a non-root --user can
+    write to it, D9/B42) — docker would leave an empty settings.xml there that breaks every other
     back-end build ("Non-readable settings ... input contained no data")."""
     cred = root / "settings.xml"
     cred.write_text("<settings/>")
     cfg = CONFIG.replace(
         _BE_BUILD,
         'build = { image = "maven:3", command = ["mvn", "package"], '
-        f'credentials = {{ "/root/.m2/settings.xml" = "{cred}" }} }}')
+        f'credentials = {{ "/tmp/.m2/settings.xml" = "{cred}" }} }}')
     assert cfg != CONFIG
     (root / "dop.toml").write_text(cfg)
     with pytest.raises(UsageError):

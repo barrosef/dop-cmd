@@ -30,9 +30,19 @@ class LockHeld(Exception):
         super().__init__(f"{unit.label} is locked by {who}")
 
 
+_UNRESERVED = re.compile(r"[A-Za-z0-9.-]")
+
+
+def _quote(part: str) -> str:
+    """Percent-encode everything but letters, digits, `.` and `-` (D13/B27): a blanket
+    char -> "_" replacement lets two distinct names collide (e.g. a suite "e2e/x" and one
+    literally named "e2e_x"); percent-encoding is reversible-shaped and never does that."""
+    return "".join(c if _UNRESERVED.match(c) else f"%{ord(c):02X}" for c in part)
+
+
 def lock_name(unit: Unit) -> str:
-    raw = "__".join(p for p in (unit.kind, unit.demand or "", unit.name or "") if p)
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", raw) + ".lock"
+    parts = [p for p in (unit.kind, unit.demand or "", unit.name or "") if p]
+    return "__".join(_quote(p) for p in parts) + ".lock"
 
 
 def _alive(pid: int) -> bool:
@@ -45,13 +55,24 @@ def _alive(pid: int) -> bool:
     return True
 
 
-def _read(path: Path) -> dict | None:
+def _read(path: Path) -> tuple[dict | None, tuple[int, int] | None]:
+    """The holder, and the (dev, ino) identity of the exact file read (D12): both come from one
+    fd, so a rename done between this read and a later decision can always be told apart from
+    ours -- the moved file's identity will no longer match what we read here."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        fd = os.open(path, os.O_RDONLY)
     except FileNotFoundError:
-        return None
-    except (OSError, ValueError):
-        return {}
+        return None, None
+    try:
+        st = os.fstat(fd)
+        data = os.read(fd, 1 << 20)
+    finally:
+        os.close(fd)
+    ident = (st.st_dev, st.st_ino)
+    try:
+        return json.loads(data.decode("utf-8")), ident
+    except (UnicodeDecodeError, ValueError):
+        return {}, ident
 
 
 @contextmanager
@@ -73,12 +94,33 @@ def lock(
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         except FileExistsError:
-            holder = _read(path)
+            holder, ident = _read(path)
             if holder is None:
                 continue  # released between our attempt and the read
             pid = holder.get("pid")
             if holder.get("host") == host and isinstance(pid, int) and not _alive(pid):
-                path.unlink(missing_ok=True)
+                # D12: renaming the stale lock aside is the atomic step -- os.rename is atomic on
+                # one filesystem, so only the process whose rename actually moves `path` can see
+                # it succeed; a racing process renaming the same (now-gone) path gets
+                # FileNotFoundError and simply retries, never believing it broke anything.
+                # That alone is not enough: `path` may have been replaced (unlinked, then
+                # recreated) by whoever we thought was dead, between our read above and this
+                # rename -- our rename would then unknowingly steal *their* live lock. `ident`
+                # was read from the same fd as `holder`, atomically; compare it to the identity
+                # of the file we actually moved before trusting it was still the dead one.
+                stale = path.with_name(f"{path.name}.stale-{os.getpid()}-{time.time_ns()}")
+                try:
+                    os.rename(path, stale)
+                except FileNotFoundError:
+                    continue  # someone else's rename won the race; retry from the top
+                moved_st = stale.stat()
+                if (moved_st.st_dev, moved_st.st_ino) != ident:
+                    # not the file we read: put the (live) lock back and fail naming its holder,
+                    # rather than silently discarding someone else's active lock.
+                    os.rename(stale, path)
+                    live_holder, _ = _read(path)
+                    raise LockHeld(unit, live_holder or holder)
+                stale.unlink(missing_ok=True)
                 print(
                     f"{unit.label}: broke stale lock of dead pid {pid} ({holder.get('command') or '?'})",
                     file=out or sys.stderr,
@@ -89,10 +131,12 @@ def lock(
             json.dump(me, fh)
         break
     else:
-        raise LockHeld(unit, _read(path) or {"pid": "?", "host": "?"})
+        holder, _ = _read(path)
+        raise LockHeld(unit, holder or {"pid": "?", "host": "?"})
 
     try:
         yield
     finally:
-        if (_read(path) or {}).get("pid") == me["pid"]:
+        holder, _ = _read(path)
+        if (holder or {}).get("pid") == me["pid"]:
             path.unlink(missing_ok=True)

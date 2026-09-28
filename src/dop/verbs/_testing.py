@@ -14,9 +14,9 @@ from typing import TYPE_CHECKING
 
 from ..address import expand, host
 from ..config import Workspace, url_refs
-from ..outcome import Unit, UnitResult, done, failed, planned, skipped
+from ..outcome import Unit, UnitResult, UsageError, done, failed, planned, skipped
 from ..runner import Mount, Runner
-from ..scope import ScopeError, branch_matches, worktrees
+from ..scope import ScopeError, branch_matches, demand_apps, worktrees
 
 if TYPE_CHECKING:
     from ..node import Node
@@ -41,7 +41,7 @@ def demand_test_tree(ws: Workspace, demand: str) -> Path:
     """The demand's worktree of the workspace repository (ws.root under git), else the main
     checkout. Raises ScopeError exactly as scope.py does for an app repo: git unreadable, more
     than one candidate worktree, or a found worktree whose path is gone (B28)."""
-    found = [w for w in worktrees(ws.root) if branch_matches(demand, w.branch)]
+    found = [w for w in worktrees(ws.root) if not w.main and branch_matches(demand, w.branch)]  # B8 amended
     if not found:
         return ws.paths.test_root
     if len(found) > 1:
@@ -231,11 +231,24 @@ def run_suite_unit(ctx, unit: Unit) -> UnitResult:
     if ctx.dry_run:
         return planned(unit, f"would run pytest for {suite} in a {ws.runners.e2e} container")
 
-    env = {key: expand(tmpl, ws, demand) for key, tmpl in app.suite_env.items()}
+    # D15/B17 parity: an app the suite references may not be in the demand (only its worktree
+    # apps plus companions are, B9/B19); resolve it to its declared `calls` fallback the same way
+    # build.py's build_env() does, so a ref outside the demand never renders a per-demand address
+    # that nothing deploys there -- expand() fails the unit naming the key when neither exists.
+    in_demand = {u.name for u in demand_apps(ws, demand)[0]}
+    fallbacks = app.fallbacks()
+    try:
+        env = {
+            key: expand(tmpl, ws, demand, apps=in_demand, fallbacks=fallbacks)
+            for key, tmpl in app.suite_env.items()
+        }
+    except UsageError as exc:
+        return failed(unit, str(exc))
     add_hosts = {
         host(ws, demand, ref): "127.0.0.1"
         for tmpl in app.suite_env.values()
         for ref in url_refs(tmpl)
+        if ref in in_demand  # a fallback address is real and outside this demand's namespace
     }
 
     results_dir = next_run_dir(ws.paths.reports / demand / suite) / "results"

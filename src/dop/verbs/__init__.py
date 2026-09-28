@@ -8,7 +8,7 @@ Each module in VERB_MODULES exports:
 from __future__ import annotations
 
 import importlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from ..context import Context
@@ -56,14 +56,29 @@ def registry() -> dict[str, Any]:
     return mods
 
 
-def act(ctx: Context, unit: Unit, fn: Callable[[], UnitResult]) -> UnitResult:
+def act(ctx: Context, unit: Unit, fn: Callable[[], UnitResult], *, family: str | None = None) -> UnitResult:
     """Run one unit's work under its lock (B27). A lock held, or any exception, fails this unit
-    only (B13). Verbs call this for every unit they act on."""
+    only (B13). Verbs call this for every unit they act on.
+
+    family (D13/B27 amended): units of the same (kind, demand, name) written by two different
+    verbs -- `test aaa` and `test it` on the same repo -- are still one writer each, not one
+    writer for both: it is folded into the *lock's* identity only (never into `unit` itself, so
+    results and labels are unaffected)."""
+    lock_unit = replace(unit, kind=f"{unit.kind}:{family}") if family else unit
     try:
-        with ctx.lock(unit):
+        with ctx.lock(lock_unit):
             return fn()
     except LockHeld as exc:
         return failed(unit, str(exc))
+    except Exception as exc:  # one unit never stops another
+        return failed(unit, f"{type(exc).__name__}: {exc}")
+
+
+def read(ctx: Context, unit: Unit, fn: Callable[[], UnitResult]) -> UnitResult:
+    """Run one unit's read-only work (B27 amended): `status`, `log`, `report` take no lock --
+    they change nothing, so they never contend with, or block, a writer."""
+    try:
+        return fn()
     except Exception as exc:  # one unit never stops another
         return failed(unit, f"{type(exc).__name__}: {exc}")
 
@@ -83,6 +98,6 @@ def stub(ctx: Context, verb: VerbSpec) -> RunSummary:
 
 
 __all__ = [
-    "Option", "VerbSpec", "VERB_MODULES", "registry", "act", "summary_from", "stub",
+    "Option", "VerbSpec", "VERB_MODULES", "registry", "act", "read", "summary_from", "stub",
     "RunSummary", "Status",
 ]

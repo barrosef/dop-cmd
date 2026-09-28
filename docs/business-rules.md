@@ -259,3 +259,6 @@ serialized (known, not handled today). Reports are synced to
   build directory or the Maven cache; host paths must be absolute or `~`-prefixed.
 - **Accepted risk:** a pod in one demand can reach another demand through the ingress by host name
   (hairpin); B4's isolation is at the Service/NetworkPolicy level, not the ingress.
+- **B18 amended.** A `calls` entry may declare `form = "browser"`: its key then gets the demand's
+  public address (B3) instead of the in-namespace Service — for addresses handed to a person, such as
+  the base of links in an e-mail.

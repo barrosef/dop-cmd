@@ -143,7 +143,10 @@ def test_secret_values_never_printed_nor_on_any_argv(ws, root, fake):
     for secret in ("s3cret-db", "s3cret-mail"):
         assert secret not in blob
     overlay = ws.state_dir / "overlays" / "K-1"
-    assert (overlay / "secret.env").stat().st_mode & 0o777 == 0o600
+    # amended v4 (B39): the secret file is transient — gone once the (last) real apply is over,
+    # success or failure — so by now there is nothing left to check a mode on; its absence is
+    # itself the assertion. architect 28/09
+    assert not (overlay / "secret.env").exists(), "secret.env must not outlive the apply (B39)"
     for f in ("kustomization.yaml", "namespace.yaml"):
         assert "s3cret" not in (overlay / f).read_text()
 

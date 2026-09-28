@@ -20,5 +20,5 @@ def run(ctx: Context) -> RunSummary:
     scope = resolve(ctx, VERB)
     summary = summary_from(scope)
     for unit in scope.units:
-        summary.add(act(ctx, unit, lambda u=unit: run_suite_unit(ctx, u)))
+        summary.add(act(ctx, unit, lambda u=unit: run_suite_unit(ctx, u), family="e2e"))
     return summary

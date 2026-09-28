@@ -24,4 +24,19 @@ if argv[:2] == ["status", "--porcelain"]:
     if p.exists():
         sys.stdout.write(p.read_text())
     sys.exit(0)
+if argv[:1] == ["ls-files"]:
+    # <basename>.lsfiles overrides (one path per line); default: every file of the real dir except
+    # the usual ignored build outputs and .git, as `--cached --others --exclude-standard` would.
+    p = base.parent / (base.name + ".lsfiles")
+    if p.exists():
+        names = [l for l in p.read_text().splitlines() if l]
+    else:
+        root = Path(d or ".")
+        skip = {".git", "target", "dist", "node_modules"}
+        ignored = lambda n: n == ".env.local" or (n.startswith(".env.") and n.endswith(".local"))
+        names = [str(f.relative_to(root)) for f in sorted(root.rglob("*"))
+                 if f.is_file() and not skip.intersection(f.relative_to(root).parts)
+                 and not ignored(f.name)]
+    sys.stdout.write("\0".join(names) + ("\0" if names else ""))
+    sys.exit(0)
 print(f"fake git: unexpected {argv}", file=sys.stderr); sys.exit(2)

@@ -25,27 +25,32 @@ def test_build_worktree_backend_mounts_worktree_and_maven_cache(ws, root, fake):
     fake.present("K-1")
     wt = worktree_dir(root, "api", "K-1")
     fake.worktrees(root / "repos/api", (wt, "feature/K-1"))
+    (wt / "target").mkdir(parents=True)
+    (wt / "target" / "app.jar").write_bytes(b"PK\x03\x04jar")  # D8/B41: the fake container built nothing
 
     summary = build.run(make_ctx(ws, tasks=["K-1"], apps=["api"]))
 
     r = _result(summary, "api")
-    assert r.status is Status.DONE
+    assert r.status is Status.DONE, r.reason
     calls = fake.log("docker")
     (run_call,) = [c for c in calls if c[:2] == ["run", "--rm"]]
     assert f"{wt}:/work" in run_call
-    assert "dop-maven-cache:/root/.m2" in run_call
+    assert "dop-maven-cache:/tmp/.m2" in run_call  # under HOME=/tmp so --user non-root can write (D9/B42)
     assert "-w" in run_call and run_call[run_call.index("-w") + 1] == "/work"
 
 
 def test_build_solo_app_has_no_companion(ws, root, fake):
     """solo has no companions (B19): only itself is built."""
     fake.present("K-2")
-    fake.worktrees(root / "repos/solo", (worktree_dir(root, "solo", "K-2"), "feature/K-2"))
+    wt = worktree_dir(root, "solo", "K-2")
+    fake.worktrees(root / "repos/solo", (wt, "feature/K-2"))
+    (wt / "target").mkdir(parents=True)
+    (wt / "target" / "app.jar").write_bytes(b"PK\x03\x04jar")  # D8/B41
 
     summary = build.run(make_ctx(ws, tasks=["K-2"]))
 
     assert {r.unit.name for r in summary.results} == {"solo"}
-    assert summary.results[0].status is Status.DONE
+    assert summary.results[0].status is Status.DONE, summary.results[0].reason
 
 
 # -- build: companions are copied from the main checkout, then built there (B31) -----------------
@@ -277,3 +282,46 @@ def test_credentials_are_mounted_read_only_and_missing_one_fails(tmp_path):
     from dop.config import Build
     b = Build(image="i", command=("true",), credentials={"/root/.npmrc": str(tmp_path / "npmrc")})
     assert b.credentials == {"/root/.npmrc": str(tmp_path / "npmrc")}
+
+
+# -- deploy: artifact validated before the node is touched (B41, D8) ------------------------------
+
+@pytest.mark.parametrize("jars", [(), ("a.jar", "b.jar"), ("a-sources.jar",)])
+def test_deploy_backend_without_exactly_one_runnable_jar_touches_nothing(ws, root, fake, jars):
+    fake.present("K-1")
+    wt = worktree_dir(root, "api", "K-1")
+    fake.worktrees(root / "repos/api", (wt, "feature/K-1"))
+    (wt / "target" / "classes").mkdir(parents=True)
+    (wt / "target" / "classes" / "A.class").write_text("x")
+    for j in jars:
+        (wt / "target" / j).write_text("PK")
+
+    r = _result(deploy.run(make_ctx(ws, tasks=["K-1"], apps=["api"])), "api")
+
+    assert r.status is Status.FAILED and "runnable jar" in r.reason
+    assert fake.log("docker") == []
+    assert not any("rollout" in c for c in fake.log("kubectl"))
+
+
+def test_deploy_backend_ignores_sources_and_javadoc_jars(ws, root, fake):
+    fake.present("K-1")
+    wt = worktree_dir(root, "api", "K-1")
+    fake.worktrees(root / "repos/api", (wt, "feature/K-1"))
+    (wt / "target").mkdir()
+    for j in ("app.jar", "app-sources.jar", "app-javadoc.jar"):
+        (wt / "target" / j).write_text("PK")
+
+    assert _result(deploy.run(make_ctx(ws, tasks=["K-1"], apps=["api"])), "api").status is Status.DONE
+
+
+def test_deploy_frontend_without_index_html_touches_nothing(ws, root, fake):
+    fake.present("K-1")
+    wt = worktree_dir(root, "fe", "K-1")
+    fake.worktrees(root / "repos/fe", (wt, "feature/K-1"))
+    (wt / "dist" / "assets").mkdir(parents=True)
+    (wt / "dist" / "assets" / "a.js").write_text("x")
+
+    r = _result(deploy.run(make_ctx(ws, tasks=["K-1"], apps=["fe"])), "fe")
+
+    assert r.status is Status.FAILED and "index.html" in r.reason
+    assert fake.log("docker") == []
