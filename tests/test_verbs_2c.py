@@ -236,3 +236,11 @@ def test_report_nothing_generated_is_skipped(ws, fake):
     r = _one(summary)
     assert r.status is Status.SKIPPED
     assert ctx.out.getvalue() == ""
+
+
+def test_b33_scan_ignores_installed_libraries(tmp_path):
+    from dop.verbs._testing import scan_env_url_keys
+    (tmp_path / "conftest.py").write_text('import os\nos.environ["E2E_BASE_URL"]\n')
+    lib = tmp_path / ".venv/lib/site-packages/requests"; lib.mkdir(parents=True)
+    (lib / "x.py").write_text('import os\nos.environ.get("CURL_CA_BUNDLE_URL")\n')
+    assert scan_env_url_keys(tmp_path) == {"E2E_BASE_URL"}

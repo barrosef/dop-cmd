@@ -192,10 +192,15 @@ def _looks_like_url_key(key: str) -> bool:
     return "URL" in up or up.endswith("_HOST") or up.endswith("_BASE")
 
 
+_SKIP_DIRS = frozenset({".venv", "venv", "site-packages", "node_modules", "__pycache__", ".pytest_cache"})
+
+
 def scan_env_url_keys(suite_dir: Path) -> set[str]:
     """Every URL-like key the suite's .py sources read from os.environ / os.getenv (B33)."""
     keys: set[str] = set()
     for f in suite_dir.rglob("*.py"):
+        if _SKIP_DIRS.intersection(f.relative_to(suite_dir).parts):  # installed libraries are not the suite
+            continue
         try:
             text = f.read_text(encoding="utf-8", errors="ignore")
         except OSError:
