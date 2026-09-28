@@ -22,8 +22,8 @@ piece of git it reads is `git worktree list`, to find where a demand's code is.
 
 ## 2. The environment
 
-- **B1 — One cluster.** A local k3s cluster (k3d) named in the workspace config. `dop` acts only when
-  the active kube context is that cluster's; any other context is refused before anything happens.
+- **B1 — One cluster.** A local k3s cluster (k3d) named in the workspace config. *(How the context
+  is enforced is B25, which supersedes the "active context" check first written here.)*
   Client production contexts live in the same kubeconfig — this rule is what keeps them safe.
 - **B2 — One entry port.** The browser reaches everything through one host port (the cluster load
   balancer, `8080` today). No service gets a port of its own. Ports are for attaching a debugger
@@ -170,3 +170,43 @@ No deletion of history. No knowledge of any particular application.
 
 **Cut from today, recorded:** none of B17–B30 is cut. Out of scope: parallel `env up` on two
 machines; a cluster recreated with a host mount (R5, deferred by the manager).
+
+## 9. Rules added after the second review (v3, 28/09)
+
+- **B31 — Every build is the demand's own.** A worktree app builds in its worktree (unique to the
+  demand). A companion (B19) is copied from the main checkout into
+  `<workspace>/.dop/builds/<DEMAND>/<app>/` and built there, so no two demands ever share a build
+  output. The companion's label is the main checkout's actual branch and short sha, plus `dirty`
+  when it has local changes — never the word `trunk` unchecked.
+- **B32 — Schedulers are an accepted risk.** B20 stands, but no application can switch scheduling off
+  today (76 `@Scheduled`, no conditional `@EnableScheduling`). `status` shows "scheduler: on
+  (not controllable)" unless *every* scheduler of that app is covered by config; partial control is
+  never shown as off.
+- **B33 — Suites are checked for addresses.** `test e2e` reads the suite's sources for environment
+  reads of URL-like keys; one not covered by the suite's `suite_env` fails the unit naming the key.
+- **B34 — Stale locks are broken.** A lock records pid and host; a lock whose process is dead on this
+  host is broken and the fact is reported.
+- **B35 — Integration runners use the host network**, so Testcontainers started beside them are
+  reachable.
+- **Cut today, recorded:** headed e2e (display/noVNC per demand) — not built; `dop test e2e` is
+  headless only.
+
+### Objections → rules
+
+| Review 1 | Rule | | Review 2 | Rule |
+|---|---|---|---|---|
+| 1 FE bundle addresses | B17 | | 1 mapping | this table |
+| 2 BE wiring | B18 | | 2 shared companion build | B31 |
+| 3 companions / zero apps | B19 | | 3 schedulers | B32 (accepted risk) |
+| 4 reports home | B23 | | 4 ADR-03/05, headed | spec step 3b; headed cut |
+| 5 e2e runner location | B21 | | 5 shared contracts | spec step 1 |
+| 6 test isolation | B22 | | 6 render ↔ base seam | spec step 1 patch targets |
+| 7 `it` claims | B22 | | 7 B1 vs B25 | B1 amended |
+| 8 deploy semantics | B24 | | 8 suite defaults | B33 + spec step 3 |
+| 9 context | B25 | | 9 stale locks | B34 |
+| 10 ownership | B26 | | 10 trunk label | B31 |
+| 11 schedulers | B20 | | 11 secrets for step 5 | spec step 5 pass criterion |
+| 12 concurrency | B27 | | 12 dead manifests | spec step 3 |
+| 13 token / missing path | B28 | | 13 Testcontainers | B35 |
+| 14 `--repo` | B29 | | | |
+| 15 manifests/secrets/k8s untracked | B30 + spec step 3 | | | |
