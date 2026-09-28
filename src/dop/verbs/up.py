@@ -10,6 +10,12 @@ stays ContainerCreating. That is not a failure here — the unit is done, noting
 Dry-run renders nothing and writes nothing (B38): the overlay is computed — so what would fail
 still fails — and the apply printed. On a real run the secret file exists only while the apply
 runs (B39).
+
+B18 amended (callee running): config still renders every key as if the whole demand were up
+(B37), but `--app` narrows what actually gets applied — so an applied app's key can point at a
+callee that is part of the demand yet has no Deployment at all, because it was never brought up
+here or in an earlier `--app` run. That is a warning on the calling app's unit, not a failure:
+`status` is what verifies wiring against the live cluster.
 """
 
 from __future__ import annotations
@@ -45,7 +51,40 @@ def _ready(ctx: Context, demand: str, app: str) -> tuple[bool, str]:
     return ready >= wanted, ("" if ready >= wanted else "waiting for deploy")
 
 
-def _run_one(ctx: Context, unit: Unit) -> UnitResult:
+def _wiring_notes(
+    ctx: Context, unit: Unit, demand_names: frozenset[str], applied_names: frozenset[str]
+) -> list[str]:
+    """B18 amended: for each of this app's calls whose callee is part of the demand, a note when
+    that callee is not actually up — a dry-run cannot know that (nothing was applied), so it warns
+    instead that the callee is left out of *this* apply; a real run checks the live Deployment.
+    A callee outside the demand (its fallback is used) is none of this unit's concern."""
+    app = ctx.ws.apps[unit.name]
+    notes = []
+    for c in app.calls:
+        if c.app not in demand_names:
+            continue
+        if ctx.dry_run:
+            if c.app not in applied_names:
+                notes.append(f"would point at local {c.app}, not in this apply")
+            continue
+        ns = namespace(ctx.ws, unit.demand)
+        data = ctx.kube.json(["get", "deployment", c.app, "-n", ns, "--ignore-not-found"])
+        if not data:
+            notes.append(
+                f"{c.key} points at local {c.app}, which is not up — "
+                f"run dop up --tasks {unit.demand} --app {c.app} (or without --app)"
+            )
+    return notes
+
+
+def _run_one(
+    ctx: Context, unit: Unit,
+    demand_names: frozenset[str] = frozenset(), applied_names: frozenset[str] = frozenset(),
+) -> UnitResult:
+    for note in _wiring_notes(ctx, unit, demand_names, applied_names):
+        # Same reasoning as the "waiting for deploy" note below: a warning on a done unit is only
+        # seen here, since `render()` drops a done unit's reason (B13).
+        print(f"{unit.label}: {note}", file=ctx.out)
     if ctx.dry_run:
         return planned(unit)
     ok, note = _ready(ctx, unit.demand, unit.name)
@@ -66,6 +105,8 @@ def run(ctx: Context) -> RunSummary:
 
     for demand, units in by_demand.items():
         every_app = scope.demand_apps.get(demand, units)
+        demand_names = frozenset(u.name for u in every_app)
+        applied_names = frozenset(u.name for u in units)
         selector = apply_selector([u.name for u in every_app], [u.name for u in units])
         try:  # render and apply are shared by every app of the demand
             if ctx.dry_run:
@@ -79,5 +120,5 @@ def run(ctx: Context) -> RunSummary:
             summary.extend(failed(u, f"{type(exc).__name__}: {exc}") for u in units)
             continue
         for unit in units:
-            summary.add(act(ctx, unit, lambda unit=unit: _run_one(ctx, unit)))
+            summary.add(act(ctx, unit, lambda unit=unit: _run_one(ctx, unit, demand_names, applied_names)))
     return summary

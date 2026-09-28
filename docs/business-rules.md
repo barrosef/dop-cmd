@@ -262,3 +262,11 @@ serialized (known, not handled today). Reports are synced to
 - **B18 amended.** A `calls` entry may declare `form = "browser"`: its key then gets the demand's
   public address (B3) instead of the in-namespace Service — for addresses handed to a person, such as
   the base of links in an e-mail.
+- **B18 amended (callee running).** Render is total (B37), so an applied app's key can point at a
+  callee that is part of the demand yet was never itself brought up — `--app` narrowed a previous
+  or this same `up` to leave it out. `up` warns per unit rather than failing it: "`KEY` points at
+  local `<callee>`, which is not up — run `dop up --tasks K --app <callee>` (or without `--app`)";
+  a dry-run, unable to check anything live, warns instead that it "would point at local `<callee>`,
+  not in this apply". `status` is the tool that verifies wiring is actually live: its wiring
+  section checks a local callee's own Deployment too, and a missing one, or one with zero ready
+  replicas, is shown `[local <callee> — NOT RUNNING]` and fails the unit with that reason.

@@ -12,23 +12,47 @@ import os
 from .conftest import FAKES, run_cli, worktree_dir
 
 
-def _configmap_kubectl(tmp_path, monkeypatch, data: dict | None) -> None:
+_HEALTHY_DEPLOYMENT = {"spec": {"replicas": 1}, "status": {"readyReplicas": 1}}
+
+
+def _configmap_kubectl(tmp_path, monkeypatch, data: dict | None, deployments: dict | None = None) -> None:
     """kubectl on PATH ahead of the real fake: answers `get configmap optum-urls` with `data`
-    (None: not found, `--ignore-not-found` gives empty output); everything else falls through to
-    the real fake (tests/fakes/kubectl)."""
+    (None: not found, `--ignore-not-found` gives empty output).
+
+    Answers `get deployment <name>` not-found by default, same as the real fake — a scenario that
+    needs a callee actually running names it in `deployments` (a payload dict, e.g. 1/1 ready;
+    `None` still means "no Deployment"). `deployments` is by app name.
+
+    Everything else falls through to the real fake (tests/fakes/kubectl)."""
     bindir = tmp_path / "kbin"
     bindir.mkdir(exist_ok=True)
     k = bindir / "kubectl"
-    # The payload is written to a file and `cat`, avoiding shell quoting entirely.
-    payload_file = bindir / "configmap.json"
-    payload_file.write_text(json.dumps({"data": data}) if data is not None else "")
-    script = (
-        "#!/bin/sh\n"
-        'case " $* " in\n'
-        f'  *"configmap optum-urls"*) cat {payload_file}; exit 0;;\n'
-        "esac\n"
-        f'exec {FAKES / "kubectl"} "$@"\n'
-    )
+    configmap_file = bindir / "configmap.json"
+    configmap_file.write_text(json.dumps({"data": data}) if data is not None else "")
+    dep_dir = bindir / "deployments"
+    dep_dir.mkdir(exist_ok=True)
+    for name, payload in (deployments or {}).items():
+        (dep_dir / f"{name}.json").write_text(json.dumps(payload) if payload is not None else "")
+    script = f'''#!/usr/bin/env python3
+import os, sys
+
+argv = sys.argv[1:]
+
+if "configmap" in argv and "optum-urls" in argv:
+    p = "{configmap_file}"
+    if os.path.exists(p) and os.path.getsize(p):
+        sys.stdout.write(open(p).read())
+    sys.exit(0)
+
+if "deployment" in argv:
+    name = argv[argv.index("deployment") + 1]
+    p = os.path.join("{dep_dir}", name + ".json")
+    if os.path.exists(p) and os.path.getsize(p):
+        sys.stdout.write(open(p).read())
+    sys.exit(0)
+
+os.execv("{FAKES / "kubectl"}", ["{FAKES / "kubectl"}", *argv])
+'''
     k.write_text(script)
     k.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
@@ -50,11 +74,14 @@ def _k1(root, fake, ws, *apps):
 
 # `be`'s companion `fe` is pulled into every demand that has `be` (config.App.companions); it has
 # calls of its own (VITE_API -> be), so both its wiring line and its own ConfigMap key are part of
-# any demand with `be` — accounted for below rather than fought.
+# any demand with `be` — accounted for below rather than fought. Since B18 amended, `fe`'s wiring
+# also checks `be` itself is running, so a demand exercising `be`'s calls has to fake both callees
+# (`api` for `be`, `be` for `fe`) as up, or that second, unasked-for check fails the whole run.
 
 def test_wiring_line_local_when_callee_is_in_the_demand(root, fake, ws, tmp_path, monkeypatch):
     k1 = _k1(root, fake, ws, "api", "be")
-    _configmap_kubectl(tmp_path, monkeypatch, data={"API_URL": "http://api:8082", "VITE_API": "http://be:8090"})
+    _configmap_kubectl(tmp_path, monkeypatch, data={"API_URL": "http://api:8082", "VITE_API": "http://be:8090"},
+                        deployments={"api": _HEALTHY_DEPLOYMENT, "be": _HEALTHY_DEPLOYMENT})
     code, out = run_cli(k1, "status", "--tasks", "K-1", "--wiring")
     assert code == 0, out
     assert "K-1/be: API_URL -> http://api:8082 [local api]" in out
@@ -63,7 +90,8 @@ def test_wiring_line_local_when_callee_is_in_the_demand(root, fake, ws, tmp_path
 def test_wiring_line_remote_when_callee_is_not_in_the_demand(root, fake, ws, tmp_path, monkeypatch):
     k1 = _k1(root, fake, ws, "be")  # api not in this demand
     _configmap_kubectl(tmp_path, monkeypatch,
-                        data={"API_URL": "https://api.remote.example", "VITE_API": "http://be:8090"})
+                        data={"API_URL": "https://api.remote.example", "VITE_API": "http://be:8090"},
+                        deployments={"be": _HEALTHY_DEPLOYMENT})  # fe's callee, in the demand
     code, out = run_cli(k1, "status", "--tasks", "K-1", "--wiring")
     assert code == 0, out
     assert "K-1/be: API_URL -> https://api.remote.example [remote api: not in the demand]" in out
@@ -71,10 +99,11 @@ def test_wiring_line_remote_when_callee_is_not_in_the_demand(root, fake, ws, tmp
 
 def test_wiring_section_appears_under_normal_status_too(root, fake, ws, tmp_path, monkeypatch):
     k1 = _k1(root, fake, ws, "api", "be")
-    _configmap_kubectl(tmp_path, monkeypatch, data={"API_URL": "http://api:8082", "VITE_API": "http://be:8090"})
+    _configmap_kubectl(tmp_path, monkeypatch, data={"API_URL": "http://api:8082", "VITE_API": "http://be:8090"},
+                        deployments={"api": _HEALTHY_DEPLOYMENT, "be": _HEALTHY_DEPLOYMENT})
     code, out = run_cli(k1, "status", "--tasks", "K-1")
     assert code == 0, out
-    assert "K-1/be: not deployed" in out  # the usual readiness line
+    assert "K-1/be: 1/1 ready" in out  # be's own readiness line, now that it is faked running
     assert "API_URL -> http://api:8082 [local api]" in out  # the wiring line, indented
 
 
@@ -104,7 +133,8 @@ def test_missing_configmap_fails_the_unit(root, fake, ws, tmp_path, monkeypatch)
 
 def test_matching_configmap_is_silent(root, fake, ws, tmp_path, monkeypatch):
     k1 = _k1(root, fake, ws, "api", "be")
-    _configmap_kubectl(tmp_path, monkeypatch, data={"API_URL": "http://api:8082", "VITE_API": "http://be:8090"})
+    _configmap_kubectl(tmp_path, monkeypatch, data={"API_URL": "http://api:8082", "VITE_API": "http://be:8090"},
+                        deployments={"api": _HEALTHY_DEPLOYMENT, "be": _HEALTHY_DEPLOYMENT})
     code, out = run_cli(k1, "status", "--tasks", "K-1", "--wiring")
     assert code == 0, out
     assert "drift" not in out
@@ -124,7 +154,64 @@ def test_status_still_takes_no_lock_with_wiring(root, fake, ws, tmp_path, monkey
     from dop.outcome import Unit
 
     k1 = _k1(root, fake, ws, "api", "be")
-    _configmap_kubectl(tmp_path, monkeypatch, data={"API_URL": "http://api:8082", "VITE_API": "http://be:8090"})
+    _configmap_kubectl(tmp_path, monkeypatch, data={"API_URL": "http://api:8082", "VITE_API": "http://be:8090"},
+                        deployments={"api": _HEALTHY_DEPLOYMENT, "be": _HEALTHY_DEPLOYMENT})
     with lock(ws.state_dir / "locks", Unit("app", "K-1", "be")):
         code, out = run_cli(k1, "status", "--tasks", "K-1", "--wiring")
     assert code == 0, out
+
+
+# -- B18 amended: a local callee's own liveness, not just its ConfigMap value --------------------
+
+def test_callee_deployment_missing_marks_local_line_not_running_and_fails(root, fake, ws, tmp_path, monkeypatch):
+    k1 = _k1(root, fake, ws, "api", "be")
+    _configmap_kubectl(tmp_path, monkeypatch,
+                        data={"API_URL": "http://api:8082", "VITE_API": "http://be:8090"},
+                        deployments={"api": None})  # no Deployment at all
+    code, out = run_cli(k1, "status", "--tasks", "K-1", "--wiring")
+    assert code == 1
+    assert "K-1/be: API_URL -> http://api:8082 [local api — NOT RUNNING]" in out
+    assert "local api is not running" in out and "dop up --tasks K-1 --app api" in out
+
+
+def test_callee_deployment_zero_ready_marks_local_line_not_running_and_fails(root, fake, ws, tmp_path, monkeypatch):
+    k1 = _k1(root, fake, ws, "api", "be")
+    _configmap_kubectl(tmp_path, monkeypatch,
+                        data={"API_URL": "http://api:8082", "VITE_API": "http://be:8090"},
+                        deployments={"api": {"spec": {"replicas": 1}, "status": {"readyReplicas": 0}}})
+    code, out = run_cli(k1, "status", "--tasks", "K-1", "--wiring")
+    assert code == 1
+    assert "[local api — NOT RUNNING]" in out
+
+
+def test_callee_deployment_running_is_silent(root, fake, ws, tmp_path, monkeypatch):
+    """Both `be`'s callee (`api`) and `fe`'s (`be` itself, its companion) faked running."""
+    k1 = _k1(root, fake, ws, "api", "be")
+    _configmap_kubectl(tmp_path, monkeypatch, data={"API_URL": "http://api:8082", "VITE_API": "http://be:8090"},
+                        deployments={"api": _HEALTHY_DEPLOYMENT, "be": _HEALTHY_DEPLOYMENT})
+    code, out = run_cli(k1, "status", "--tasks", "K-1", "--wiring")
+    assert code == 0, out
+    assert "NOT RUNNING" not in out
+
+
+def test_remote_callee_not_checked_for_liveness(root, fake, ws, tmp_path, monkeypatch):
+    """`api` is not in this demand (remote, fallback address): its Deployment is never queried,
+    however it is faked, because it is not this demand's to bring up. `be` is faked running for
+    `fe`'s own local call to it (its companion, also in the demand)."""
+    k1 = _k1(root, fake, ws, "be")  # api not in this demand
+    _configmap_kubectl(tmp_path, monkeypatch,
+                        data={"API_URL": "https://api.remote.example", "VITE_API": "http://be:8090"},
+                        deployments={"api": None, "be": _HEALTHY_DEPLOYMENT})
+    code, out = run_cli(k1, "status", "--tasks", "K-1", "--wiring")
+    assert code == 0, out
+    assert "NOT RUNNING" not in out
+
+
+def test_dry_run_still_skips_the_liveness_check(root, fake, ws, tmp_path, monkeypatch):
+    k1 = _k1(root, fake, ws, "api", "be")
+    _configmap_kubectl(tmp_path, monkeypatch,
+                        data={"API_URL": "http://api:8082", "VITE_API": "http://be:8090"},
+                        deployments={"api": None})
+    code, out = run_cli(k1, "status", "--tasks", "K-1", "--wiring", "--dry-run")
+    assert code == 0, out
+    assert "NOT RUNNING" not in out
