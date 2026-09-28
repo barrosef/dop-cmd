@@ -1,7 +1,9 @@
 """dop test it — integration tests on the demand's worktree (§5, B22, B29, B35)."""
 
 from ..context import Context
-from . import RunSummary, VerbSpec, stub
+from ..scope import resolve
+from . import RunSummary, VerbSpec, act, summary_from
+from ._testing import run_repo_layer
 
 VERB = VerbSpec(
     name="test it",
@@ -12,4 +14,8 @@ VERB = VerbSpec(
 
 
 def run(ctx: Context) -> RunSummary:
-    return stub(ctx, VERB)
+    scope = resolve(ctx, VERB)
+    summary = summary_from(scope)
+    for unit in scope.units:
+        summary.add(act(ctx, unit, lambda u=unit: run_repo_layer(ctx, u, "it")))
+    return summary

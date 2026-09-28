@@ -56,7 +56,7 @@ def test_key_is_upper_cased(root, fake):
     fake.worktrees(root / "repos/solo", (worktree_dir(root, "solo", "SUOPT-1530"), "feature/suopt-1530"))
     code, out = run_cli(root, "up", "--tasks", "suopt-1530")
     assert "SUOPT-1530/solo" in out
-    assert code == 3  # stub: every unit skipped
+    assert "suopt-1530" not in out.replace("suopt-1530.localhost", "").replace("/suopt-1530", "")  # key never kept lower-case
 
 
 # -- B25 context --------------------------------------------------------------------------------
@@ -98,7 +98,7 @@ def test_one_failed_unit_does_not_stop_others_and_exits_1(root, fake):
     code, out = run_cli(root, "status")
     assert code == 1
     assert "failed   K-1/api" in out
-    assert "skipped  K-1/solo" in out
+    assert "1 done, 1 failed" in out  # the ambiguous repo fails alone; solo still acts
 
 
 def test_cluster_unreadable_exits_1(root, fake):

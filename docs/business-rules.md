@@ -220,3 +220,10 @@ build variable's fallback is that front-end's own `calls` entry for the target a
 `demand/<dir>/`, `demand/{backends,frontends}/<app>/` (+ shared dirs by kind) is a contract with the
 workspace; a named demand that is not present is skipped with the reason on every verb except `up`
 and `down`.
+
+### Step-2 choices accepted by the architect (28/09)
+
+Maven cache is the docker volume `dop-maven-cache`; a back-end rollout waits 180 s. `up` renders and
+applies once per demand, outside the unit lock — two concurrent `up` on the same demand are not
+serialized (known, not handled today). Reports are synced to
+`<node_root>/<shared_namespace>/reports/<DEMAND>/<project>/`, which the `reports` service serves.
