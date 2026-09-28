@@ -62,7 +62,7 @@ def test_env_up_applies_shared_manifests_and_seeds_reports_dir(ws, fake):
     assert _applied(_kubectl(fake), ws.paths.manifests / "shared")
     docker_calls = _docker(fake)
     assert [c[0] for c in docker_calls] == ["exec", "cp", "exec", "exec", "exec"]
-    assert docker_calls[3][-1] == "/workspace/reports"  # sync script's destination arg
+    assert docker_calls[3][-1] == f"/workspace/{ws.address.shared_namespace}/reports"  # sync script's destination arg
 
 
 def test_env_up_is_idempotent(ws, fake):

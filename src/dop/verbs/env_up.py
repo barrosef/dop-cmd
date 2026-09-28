@@ -29,7 +29,7 @@ def _seed_reports_dir(ctx: Context) -> None:
     staging = ctx.ws.state_dir / "seed" / _REPORTS_DIR
     staging.mkdir(parents=True, exist_ok=True)
     (staging / "index.html").write_text(_PLACEHOLDER, encoding="utf-8")
-    ctx.node.sync(staging, ctx.node.path(_REPORTS_DIR))
+    ctx.node.sync(staging, ctx.node.path(ctx.ws.address.shared_namespace, _REPORTS_DIR))
 
 
 def _run_one(ctx: Context, unit: Unit) -> UnitResult:
