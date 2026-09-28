@@ -270,3 +270,6 @@ serialized (known, not handled today). Reports are synced to
   not in this apply". `status` is the tool that verifies wiring is actually live: its wiring
   section checks a local callee's own Deployment too, and a missing one, or one with zero ready
   replicas, is shown `[local <callee> — NOT RUNNING]` and fails the unit with that reason.
+- **B36 amended (secret environment).** A build may also declare `build.secret_env = ["KEY", …]`:
+  those host environment variables are passed into the build container by name only — never on the
+  command line, never printed; a missing one fails the unit naming the key.

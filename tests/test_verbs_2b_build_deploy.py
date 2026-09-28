@@ -325,3 +325,9 @@ def test_deploy_frontend_without_index_html_touches_nothing(ws, root, fake):
 
     assert r.status is Status.FAILED and "index.html" in r.reason
     assert fake.log("docker") == []
+
+
+def test_b36_secret_env_is_declared_by_name_only():
+    from dop.config import Build
+    b = Build(image="i", command=("true",), secret_env=("NPM_TOKEN_B64",))
+    assert b.secret_env == ("NPM_TOKEN_B64",)

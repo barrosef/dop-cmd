@@ -195,6 +195,10 @@ def _run_one(ctx: Context, unit: Unit) -> UnitResult:
             _copy_checkout(unit.path, dest)
 
     env = {**(build_env(ws, app, unit) if app.kind == "frontend" else {}), "HOME": _HOME}
+    for key in app.build.secret_env:  # B36: by name from the host environment, value never shown
+        if not os.environ.get(key):
+            raise RuntimeError(f"build secret {key} is not set in this environment")
+        env[key] = os.environ[key]
     mounts = [Mount(dest, _WORKDIR)]
     if app.kind == "backend":
         mounts.append(Mount(_MAVEN_CACHE_VOLUME, _MAVEN_CACHE_PATH))

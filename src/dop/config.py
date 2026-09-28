@@ -77,6 +77,9 @@ class Build:
     env: dict[str, str] = field(default_factory=dict)  # values may hold {url:<app>} (B17)
     # Host credential files mounted read-only into the build container (B36): container path -> host path.
     credentials: dict[str, str] = field(default_factory=dict)
+    # Host environment variables passed into the build container by name (B36): never printed,
+    # never on argv; a missing one fails the unit naming the key.
+    secret_env: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -252,6 +255,11 @@ class _Parser:
             out[k] = v
         return out
 
+    def _secret_env(self, value: Any, where: str) -> tuple[str, ...]:
+        if not isinstance(value, list) or not all(isinstance(v, str) and _ENV_KEY.match(v) for v in value):
+            raise self.fail(where, "must be a list of variable names")
+        return tuple(value)
+
     def path_map(self, value: Any, where: str) -> dict[str, str]:
         """Container absolute path -> host path (B36, B43). The container path may not lie inside
         the build directory or the Maven cache; the host path is expanded (`~`) and, when not
@@ -365,7 +373,7 @@ class _Parser:
         if not _DNS_LABEL.match(service):
             raise self.fail(f"{w}.service", "must be a lower-case DNS label")
 
-        b = self.table(t["build"], f"{w}.build", ("image", "command"), ("env", "credentials"))
+        b = self.table(t["build"], f"{w}.build", ("image", "command"), ("env", "credentials", "secret_env"))
         cmd = b["command"]
         if isinstance(cmd, str):
             command: tuple[str, ...] = ("sh", "-c", self.string(cmd, f"{w}.build.command"))
@@ -378,6 +386,7 @@ class _Parser:
             command=command,
             env=self.str_map(b.get("env", {}), f"{w}.build.env"),
             credentials=self.path_map(b.get("credentials", {}), f"{w}.build.credentials"),
+            secret_env=self._secret_env(b.get("secret_env", []), f"{w}.build.secret_env"),
         )
 
         calls_raw = t.get("calls", [])
