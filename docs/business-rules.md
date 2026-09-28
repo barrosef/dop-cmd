@@ -232,3 +232,30 @@ serialized (known, not handled today). Reports are synced to
   credential files (`build.credentials = { "<path in container>" = "<host path>" }`). They are
   mounted read-only, never copied into a build directory or an artifact, never printed. An absent
   file fails the unit naming the path, not the content.
+
+## 10. Decisions after QA (v4, 28/09) — binding
+
+- **B8 amended.** Only *linked* worktrees are a demand's code. The main checkout is never a demand's
+  worktree, whatever its branch; it is only the companion source (B31), labelled with its real
+  branch, sha and `dirty`. A companion may therefore carry another demand's uncommitted code — the
+  label says so; that is an accepted, visible risk.
+- **B27 amended.** Read-only verbs (`status`, `log`, `report`) take no lock. `down` takes every app
+  lock of the demand. The unit identity includes the verb family (`test aaa` and `test it` differ)
+  and is escaped so distinct names never collide.
+- **B37 — Render is total.** `up` always renders the demand's whole config (every app of the demand,
+  every key any app of the workspace declares) regardless of `--app`; `--app` narrows which
+  workloads are applied, never what config says. A patch target that does not match fails the
+  demand. Cluster-scoped kinds in the demand base are refused.
+- **B38 — Dry-run writes nothing**, anywhere: no overlay, no secret file, no seed, no lock.
+- **B39 — Secret files are transient.** The rendered secret file exists only for the duration of the
+  `apply` and is deleted afterwards, success or failure; `.dop/` is git-ignored by the workspace.
+- **B40 — Ownership is checked at delete time.** `down` deletes by label selector
+  (`dop/demand=<KEY>`, `app.kubernetes.io/managed-by=dop`), never by computed name; a namespace
+  that exists under the computed name without those labels fails `up` and `down` for that demand.
+- **B41 — Artifacts are validated.** A back-end artifact must contain exactly one runnable jar; a
+  front-end artifact must contain `index.html`. Build fails when it produced no valid artifact.
+- **B42 — Builds run as the invoking user** (uid:gid), never root.
+- **B43 — Credential mounts are confined.** A credential's container path may not lie inside the
+  build directory or the Maven cache; host paths must be absolute or `~`-prefixed.
+- **Accepted risk:** a pod in one demand can reach another demand through the ingress by host name
+  (hairpin); B4's isolation is at the Service/NetworkPolicy level, not the ingress.
