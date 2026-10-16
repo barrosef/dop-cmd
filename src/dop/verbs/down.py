@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 from typing import Callable
 
-from ..cluster import ClusterDriver, driver_for, environment_tools
+from ..cluster import ClusterDriver, driver_for
 from ..config import Config
 from ..core import process
 from ..core.errors import ProcessError
@@ -72,9 +72,13 @@ def run(
     dry_run = bool(getattr(args, "dry_run", False))
     processes = processes or ProcessManager(config.project.state_dir)
     driver = driver_for(config, runner=runner, kube_factory=kube_factory, dry_run=dry_run)
+    env = config.environment
     if not dry_run:
+        # Exactly the commands `down` runs: the state probes, the kubeconfig it
+        # hands to `cluster_stop`, and `cluster_stop` itself. `down` runs no
+        # kubectl of its own, so `kubectl` is not required here.
         (tool_check or process.require_tools)(
-            environment_tools(config.environment, "cluster_exists", "cluster_running", "cluster_stop")[:-1]
+            [c for c in (env.cluster_exists, env.cluster_running, env.kubeconfig, env.cluster_stop) if c]
         )
 
     def go() -> int:

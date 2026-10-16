@@ -11,8 +11,10 @@ components, their `needs` closure, and the environment if any of them is a
    `none` → nothing to bring up.
 4. One line per unit (outcome, address), then the environment's `addresses`.
 
-Exit: 0 all done, 3 some failed or skipped, 1 none done or the environment
-failed, 2 configuration or missing tool.
+Exit, over the units asked for (every component when none is named): 0 all
+done, 3 some failed or skipped, 1 none done or the environment failed, 2
+configuration or missing tool. A dependency in the closure that was not asked
+for is reported but does not make the verdict partial.
 """
 
 from __future__ import annotations
@@ -186,10 +188,11 @@ def bring_up(
     _print(outcomes, environment.addresses if needs_environment else [])
     if dry_run:
         return 0
-    if needs_environment:
-        # The environment is done here; the verdict is the components'.
-        return _exit_code(outcomes[1:]) if len(outcomes) > 1 else 0
-    return _exit_code(outcomes)
+    # The verdict is the units that were asked for (every component when none
+    # was named): `dop up app` whose app fails is failed (1), not partial (3),
+    # even when the bff and core it needed came up. The environment is done here.
+    asked = set(names) if names else set(config.components)
+    return _exit_code([o for o in outcomes if o.unit in asked])
 
 
 def _cluster_up(

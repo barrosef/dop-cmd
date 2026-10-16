@@ -394,3 +394,88 @@ def test_status_changes_nothing_not_even_a_stale_pid_file(env):
     pm.pid_path(app).write_text("999999999\n")
     _status(config, pm)
     assert pm.pid_path(app).exists()
+
+
+# ---------------------------------------------------------------- S1 regressions (live validation)
+
+
+def _up_app(config, pm, cluster, probe, **kw):
+    from dop.verbs import up
+
+    return up.run(
+        config, argparse.Namespace(components=["app"], dry_run=False, verbose=False, config=None),
+        runner=mixed_runner(cluster), kube_factory=cluster.kube, tool_check=lambda c: None,
+        ready_wait=lambda *a: True, processes=pm, probe=probe, waiter=fast_waiter, **kw,
+    )
+
+
+def test_up_app_with_the_port_held_exits_1_not_partial(env, capsys):
+    # Live: `dop up app` with a stranger on :5173 printed the right line but exited 3,
+    # because core and bff (the closure, not asked for) were done.
+    config, pm = env
+    rc = _up_app(config, pm, Cluster("running"), probe=lambda url: True)
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert any(line.startswith("app") and "port held by a process dop does not own" in line for line in out.splitlines())
+    assert pm.owned() == []
+
+
+def test_up_app_whose_process_dies_exits_1(env, capsys):
+    config, pm = env
+    config = dataclasses.replace(
+        config, components={**config.components, "app": _app(config, run="exit 7")}
+    )
+    rc = _up_app(config, pm, Cluster("running"), probe=lambda url: False)
+    assert rc == 1
+    assert "process exited" in capsys.readouterr().out
+
+
+def test_up_everything_with_only_app_failing_is_partial(env):
+    from dop.verbs import up
+
+    config, pm = env
+    cluster = Cluster("running")
+    rc = up.run(
+        config, _args(), runner=mixed_runner(cluster), kube_factory=cluster.kube, tool_check=lambda c: None,
+        ready_wait=lambda *a: True, processes=pm, probe=lambda url: True, waiter=fast_waiter,
+    )
+    assert rc == 3
+
+
+def test_down_checks_exactly_the_commands_it_runs(env):
+    # S0c: `down` sliced `[:-1]` off a list that ends in "kubectl" and never checked
+    # the kubeconfig command it hands to `cluster_stop`.
+    config, pm = env
+    seen = []
+    cluster = Cluster("running")
+    down.run(config, _args(), runner=cluster.run, kube_factory=cluster.kube, tool_check=seen.append, processes=pm)
+    environment = config.environment
+    assert seen == [[environment.cluster_exists, environment.cluster_running, environment.kubeconfig, environment.cluster_stop]]
+
+
+def test_reset_checks_process_tools_before_down_destroys_data(env):
+    # S0c: reset handed a no-op tool_check to bring_up, so a missing `pnpm` was
+    # found (if at all) after `make down` had deleted the namespace.
+    config, pm = env
+    cluster = Cluster("running")
+
+    def tools(commands):
+        if any(cmd.startswith("true") or cmd.startswith("sleep") for cmd in commands):
+            raise ToolMissing("sleep")
+
+    with pytest.raises(ToolMissing):
+        reset.run(config, _args(), runner=mixed_runner(cluster), kube_factory=cluster.kube, tool_check=tools,
+                  ready_wait=lambda *a: True, processes=pm, probe=lambda url: False, waiter=fast_waiter)
+    assert cluster.calls == []
+
+
+def test_reset_hands_the_real_tool_check_to_the_up_that_follows(env):
+    config, pm = env
+    cluster = Cluster("running")
+    seen = []
+    app = config.components["app"]
+    reset.run(config, _args(), runner=mixed_runner(cluster), kube_factory=cluster.kube, tool_check=seen.append,
+              ready_wait=lambda *a: True, processes=pm,
+              probe=lambda url: pm.alive(app, cleanup=False) is not None, waiter=fast_waiter)
+    assert [app.setup, app.run] in seen  # process_up's own check ran with it
+    assert app.setup in seen[0] and app.run in seen[0]  # and the upfront one covered it

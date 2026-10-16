@@ -36,8 +36,18 @@ def run(
     dry_run = bool(getattr(args, "dry_run", False))
     processes = processes or ProcessManager(config.project.state_dir)
     driver = driver_for(config, runner=runner, kube_factory=kube_factory, dry_run=dry_run)
+    tool_check = tool_check or process.require_tools
     if not dry_run:
-        (tool_check or process.require_tools)(environment_tools(config.environment, *ENV_TOOLS, "down"))
+        # Everything the reset will run, checked before `down` destroys any data:
+        # a missing `pnpm` found after the namespace is gone is a reset half done.
+        process_tools = [
+            cmd
+            for component in config.components.values()
+            if component.kind == "process"
+            for cmd in (component.setup, component.run)
+            if cmd
+        ]
+        tool_check(environment_tools(config.environment, *ENV_TOOLS, "down") + process_tools)
 
     def go() -> int:
         stop_owned_processes(config, processes=processes, dry_run=dry_run, verb="reset")
@@ -49,7 +59,7 @@ def run(
             return 0 if dry_run else 1
         return bring_up(
             config, [], driver=driver, processes=processes, dry_run=dry_run,
-            ready_wait=ready_wait, tool_check=lambda commands: None,
+            ready_wait=ready_wait, tool_check=tool_check,
             runner=runner, probe=probe, waiter=waiter,
         )
 
