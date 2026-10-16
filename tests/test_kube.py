@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from dop import kube as kube_module
 from dop.core.errors import ProcessError
-from dop.core.process import Result
-from dop.kube import Kube
+from dop.core.process import Result, run
+from dop.kube import Kube, WorkloadState, parse_workloads, workload_ref
 
 
 def test_port_forward_dry_run(capsys, tmp_path):
@@ -68,9 +70,70 @@ def test_port_forward_bad_spec(spec):
         Kube("/k", "ns", dry_run=True).port_forward(spec)
 
 
-def test_cluster_side_is_a_later_slice():
-    k = Kube("/k", "ns")
-    with pytest.raises(NotImplementedError):
-        k.rollout_wait("deploy/x", 1)
-    with pytest.raises(NotImplementedError):
-        k.get_workloads()
+def test_rollout_wait_streams_with_kubeconfig(monkeypatch):
+    calls = []
+    monkeypatch.setattr(kube_module, "run", lambda cmd, **kw: calls.append((cmd, kw)) or Result(rc=0))
+    assert Kube("/tmp/kc", "dop-local").rollout_wait("sts/postgres", 240.0) is True
+    cmd, kwargs = calls[0]
+    assert cmd == "kubectl -n dop-local rollout status sts/postgres --timeout=240s"
+    assert kwargs["env"] == {"KUBECONFIG": "/tmp/kc"} and kwargs["mode"] == "stream"
+
+
+def test_rollout_wait_failure_is_false(monkeypatch):
+    monkeypatch.setattr(kube_module, "run", lambda cmd, **kw: Result(rc=1))
+    assert Kube("/k", "ns").rollout_wait("deploy/x", 1.5) is False
+
+
+def test_rollout_wait_dry_run_runs_nothing(monkeypatch, capsys):
+    monkeypatch.setattr(kube_module, "run", lambda *a, **k: pytest.fail("ran in dry-run"))
+    assert Kube("/k", "ns", dry_run=True).rollout_wait("deploy/x", 5) is True
+    assert capsys.readouterr().out == "WOULD WAIT rollout deploy/x\n"
+
+
+GET_JSON = json.dumps({
+    "items": [
+        {"kind": "Deployment", "metadata": {"name": "dop-api"}, "spec": {"replicas": 2}, "status": {"readyReplicas": 1}},
+        {"kind": "Deployment", "metadata": {"name": "dop-core-serve"}, "spec": {"replicas": 1}, "status": {}},
+        {"kind": "StatefulSet", "metadata": {"name": "postgres"}, "spec": {"replicas": 1}, "status": {"readyReplicas": 1}},
+    ]
+})
+
+
+def test_get_workloads_parses_deploy_and_sts(monkeypatch):
+    calls = []
+    monkeypatch.setattr(kube_module, "run", lambda cmd, **kw: calls.append((cmd, kw)) or Result(rc=0, stdout=GET_JSON))
+    states = Kube("/tmp/kc", "dop-local").get_workloads()
+    assert calls[0][0] == "kubectl -n dop-local get deploy,sts -o json"
+    assert calls[0][1]["mode"] == "capture" and calls[0][1]["env"] == {"KUBECONFIG": "/tmp/kc"}
+    assert states == [
+        WorkloadState("deploy", "dop-api", 1, 2),
+        WorkloadState("deploy", "dop-core-serve", 0, 1),
+        WorkloadState("sts", "postgres", 1, 1),
+    ]
+    assert [s.is_ready for s in states] == [False, False, True]
+    assert states[2].ref == "sts/postgres"
+
+
+def test_get_workloads_failure_raises(monkeypatch):
+    monkeypatch.setattr(kube_module, "run", lambda cmd, **kw: Result(rc=1, stdout="connection refused"))
+    with pytest.raises(ProcessError, match="connection refused"):
+        Kube("/k", "ns").get_workloads()
+
+
+def test_get_workloads_bad_json_raises():
+    with pytest.raises(ProcessError, match="not JSON"):
+        parse_workloads("nope")
+
+
+def test_get_workloads_dry_run_parses_nothing(monkeypatch, capsys):
+    monkeypatch.setattr(kube_module, "run", run)
+    assert Kube("/k", "ns", dry_run=True).get_workloads() == []
+    assert capsys.readouterr().out == "WOULD RUN kubectl -n ns get deploy,sts -o json\n"
+
+
+@pytest.mark.parametrize("given, folded", [
+    ("deploy/x", "deploy/x"), ("deployment/x", "deploy/x"), ("Deployment/x", "deploy/x"),
+    ("sts/y", "sts/y"), ("statefulset/y", "sts/y"),
+])
+def test_workload_ref(given, folded):
+    assert workload_ref(given) == folded

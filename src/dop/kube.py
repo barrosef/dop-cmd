@@ -6,6 +6,7 @@ kubeconfig the environment's `kubeconfig` command printed.
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import time
@@ -18,11 +19,68 @@ from .core.process import kill_group, run
 PORT_FORWARD_TIMEOUT = 30.0
 
 
+# `kubectl` resource kinds as `dop.toml` may spell them, folded to one short form.
+_KIND_ALIASES = {
+    "deploy": "deploy",
+    "deployment": "deploy",
+    "deployments": "deploy",
+    "sts": "sts",
+    "statefulset": "sts",
+    "statefulsets": "sts",
+}
+_KIND_OF_OBJECT = {"Deployment": "deploy", "StatefulSet": "sts"}
+
+
+def workload_ref(workload: str) -> str:
+    """Fold ``deployment/x`` / ``Deployment/x`` / ``deploy/x`` to ``deploy/x`` (likewise ``sts``)."""
+    kind, sep, name = workload.partition("/")
+    if not sep:
+        return workload
+    return f"{_KIND_ALIASES.get(kind.lower(), kind.lower())}/{name}"
+
+
 @dataclass(frozen=True)
 class WorkloadState:
+    kind: str  # "deploy" or "sts"
     name: str
     ready: int
     desired: int
+
+    @property
+    def ref(self) -> str:
+        return f"{self.kind}/{self.name}"
+
+    @property
+    def is_ready(self) -> bool:
+        return self.desired > 0 and self.ready >= self.desired
+
+
+def parse_workloads(text: str) -> list[WorkloadState]:
+    """Read ``kubectl get deploy,sts -o json``; a missing ``readyReplicas`` is 0."""
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ProcessError(f"kubectl get: output is not JSON ({exc.msg})") from None
+    items = document.get("items", []) if isinstance(document, dict) else []
+    states = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        raw_kind = item.get("kind", "")
+        kind = _KIND_OF_OBJECT.get(raw_kind, raw_kind.lower())
+        name = (item.get("metadata") or {}).get("name", "")
+        spec = item.get("spec") or {}
+        status = item.get("status") or {}
+        desired = spec.get("replicas")
+        states.append(
+            WorkloadState(
+                kind=kind,
+                name=name,
+                ready=int(status.get("readyReplicas") or 0),
+                desired=int(1 if desired is None else desired),
+            )
+        )
+    return states
 
 
 def _local_ports(spec: str) -> list[int]:
@@ -86,10 +144,31 @@ class Kube:
         return {"KUBECONFIG": self.kubeconfig_path}
 
     def rollout_wait(self, workload: str, timeout: float) -> bool:
-        raise NotImplementedError("S0b")
+        """``kubectl rollout status`` streamed to the terminal; True when it reports ready in time.
+
+        In dry-run nothing runs: ``WOULD WAIT rollout <workload>`` and True.
+        """
+        if self.dry_run:
+            print(f"WOULD WAIT rollout {workload}", flush=True)
+            return True
+        cmd = f"kubectl -n {self.namespace} rollout status {workload} --timeout={timeout:g}s"
+        return run(cmd, cwd=self.cwd, env=self.env, mode="stream").rc == 0
 
     def get_workloads(self) -> list[WorkloadState]:
-        raise NotImplementedError("S0b")
+        """Every Deployment and StatefulSet in the namespace, with ready/desired replicas.
+
+        In dry-run the command is printed, nothing is parsed and the list is empty.
+        A failing kubectl raises ``ProcessError``.
+        """
+        cmd = f"kubectl -n {self.namespace} get deploy,sts -o json"
+        if self.dry_run:
+            run(cmd, cwd=self.cwd, env=self.env, mode="capture", dry_run=True)
+            return []
+        result = run(cmd, cwd=self.cwd, env=self.env, mode="capture")
+        if result.rc != 0:
+            detail = f": {result.stdout.strip()}" if result.stdout.strip() else ""
+            raise ProcessError(f"kubectl get deploy,sts failed (rc {result.rc}){detail}")
+        return parse_workloads(result.stdout)
 
     def _log_file(self, spec: str) -> Path:
         if self.log_dir is None:

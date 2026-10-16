@@ -112,8 +112,6 @@ def test_dry_run_through_main(example_config, capsys):
     assert out[:2] == ["WOULD RUN uv sync", "WOULD RUN make test"]
 
 
-@pytest.mark.parametrize("verb", ["up", "down", "status", "logs", "reset"])
-def test_later_slice_verbs_exit_1(example_config, verb, capsys):
-    argv = ["--config", str(example_config), verb] + (["app"] if verb == "logs" else [])
-    assert cli.main(argv) == 1
+def test_later_slice_verbs_exit_1(example_config, capsys):
+    assert cli.main(["--config", str(example_config), "logs", "app"]) == 1
     assert "not implemented in this slice" in capsys.readouterr().err
