@@ -6,7 +6,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from .fs import ensure_dir
 from .security import redact, guard_text
 
 
@@ -19,7 +18,7 @@ class Logger:
         line = f"[{timestamp}] {level} {message}"
         guard_text(line)
         safe = redact(line)
-        ensure_dir(self.log_path.parent)
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(safe + "\n")
         print(safe, file=stream)
@@ -44,11 +43,11 @@ class NullLogger(Logger):
 
 
 
-def build_log_path(jira_key: str, command: str, *, logs_dir: Path) -> Path:
+def build_log_path(name: str, command: str, *, logs_dir: Path) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"{timestamp}-{command}.log"
     return logs_dir / filename
 
 
-def get_logger(jira_key: str, command: str, *, logs_dir: Path) -> Logger:
-    return Logger(build_log_path(jira_key, command, logs_dir=logs_dir))
+def get_logger(name: str, command: str, *, logs_dir: Path) -> Logger:
+    return Logger(build_log_path(name, command, logs_dir=logs_dir))

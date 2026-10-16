@@ -1,2 +1,2 @@
-"""dop - DevOps Pipeline CLI for IA-First development workflow."""
-__version__ = "0.7.1"
+"""dop - operates a project's environment from the project's dop.toml."""
+__version__ = "1.0.0"

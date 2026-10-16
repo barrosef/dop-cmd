@@ -39,7 +39,19 @@ Pontos de aplicação:
 - ➕ O prefixo do token é preservado na redação (ajuda a diagnosticar *qual tipo* de
   credencial estava errada sem revelá-la).
 - ➖ A redação é baseada em padrões; segredos com formato incomum podem escapar — por
-  isso a regra "**nunca logar `git_env()`**" ([ADR-0005](0005-abstracao-de-autenticacao-git.md))
+  isso a regra "**nunca logar `git_env()`**" (antigo ADR-0005, removido)
   permanece como defesa primária.
 - ➖ `guard_text` bloqueia a *string* literal `os.environ`, o que é uma heurística
   específica contra o ataque mais provável (agente tentando dumpar o ambiente).
+
+## Amendment — 2026-10-16 (ADR-0016)
+
+Still holds: `core/security.py` (`redact`, `guard_text`) unchanged, and the
+logger redacts every message.
+
+Changed by the readaptation: `core/process.py` was rewritten. It runs shell
+strings in three modes (`stream`, `capture`, `detach`); `guard_text` checks
+every command, and in `capture` mode the output of a **failed** command is
+redacted before it is returned. `stream` output goes straight to the terminal
+and `detach` output to its log file, unredacted, as any tool run by hand would.
+The git and pull-request code paths this ADR mentions no longer exist.

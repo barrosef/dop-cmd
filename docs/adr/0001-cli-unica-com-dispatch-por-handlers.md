@@ -33,7 +33,7 @@ Decisões de apoio:
   `ERROR: …`, exit 1) e qualquer `Exception` inesperada (redige), evitando
   *tracebacks* crus para o usuário.
 - **Contexto resolvido uma vez no `main()`:** workspace, logger, auth e resolução
-  de alias da Jira são montados antes do dispatch, então handlers recebem tudo pronto.
+  de alias da demanda são montados antes do dispatch, então handlers recebem tudo pronto.
 
 ## Consequências
 
@@ -44,3 +44,16 @@ Decisões de apoio:
 - ➖ O arquivo `cli.py` concentra muitos handlers de demanda/integração (~825 linhas);
   handlers de runtime já foram extraídos para `runtime/handlers.py`. Há espaço para
   extrair também os de demanda no futuro.
+
+## Amendment — 2026-10-16 (ADR-0016)
+
+Still holds: one entry point (`dop.cli:main`), `argparse` subparsers, central
+exception handling with no raw tracebacks, redacted usage errors.
+
+Changed by the readaptation: the CLI has exactly six subcommands (`up`, `down`,
+`status`, `logs`, `test`, `reset`), one module per verb under `src/dop/verbs/`,
+each exposing `run(config, args) -> int`. The context built once in `main()` is
+now only the loaded `dop.toml` (`Config`); there is no workspace, logger or
+credential argument. Exit codes are `0` done, `1` failed, `2` usage or
+configuration error (including a missing tool), `3` partial. The demand and
+integration handlers described above no longer exist.

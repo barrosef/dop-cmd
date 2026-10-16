@@ -4,16 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dop-cmd"
-version = "0.7.1"
-description = "DevOps Pipeline CLI - IA-First unified tooling (git+PR, docker-compose runtime, e2e, reports)"
+version = "1.0.0"
+description = "dop - operates the project's local environment from a dop.toml (up, down, status, logs, test, reset)"
 requires-python = ">=3.11"
-dependencies = [
-    "PyGithub>=2.0",
-    "python-gitlab>=4.0",
-]
+dependencies = []
 
 [project.scripts]
 dop = "dop.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

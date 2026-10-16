@@ -31,3 +31,14 @@ camadas. O contrato é uniforme:
   novo), evitando side-effects acidentais.
 - ➖ Exige disciplina: toda nova função com efeito colateral precisa aceitar e
   honrar `dry_run`. É um invariante que revisões de código devem proteger.
+
+## Amendment — 2026-10-16 (ADR-0016)
+
+Still holds: a global `--dry-run` honoured by every side effect.
+
+Changed by the readaptation: `core/process.run(..., dry_run=True)` prints
+`WOULD RUN <cmd>` (no colon) and returns rc 0 for every mode; probes and polls
+print `WOULD WAIT <what>` (for example `WOULD WAIT port-forward svc/nats
+4222:4222`). Dry-run parses nothing, skips the missing-tool check, and exits 0.
+The flag is accepted before or after the verb. `core/fs.py`, `git/*`,
+`platform/*` and `runtime/*` no longer exist.

@@ -1,59 +1,165 @@
-"""Subprocess helpers with redaction and dry-run support."""
+"""Run shell commands in the three modes the verbs need.
+
+- ``stream``  foreground, inherits the terminal; returns the return code.
+- ``capture`` stdout returned; on failure stdout and stderr are redacted.
+- ``detach``  new session, stdout+stderr appended to ``log_file``; pid returned.
+
+Every command is a shell string. ``dry_run`` prints ``WOULD RUN <cmd>`` and
+returns rc 0 without running anything.
+"""
 
 from __future__ import annotations
 
+import os
 import shlex
+import shutil
+import signal
 import subprocess
+import sys
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from .errors import ProcessError
+from .errors import ToolMissing
 from .security import guard_text, redact
 
+MODES = ("stream", "capture", "detach")
 
-def _format_command(cmd: Iterable[str]) -> str:
-    return " ".join(shlex.quote(str(part)) for part in cmd)
+# Words that are not executables on PATH and must not be looked up.
+_SHELL_BUILTINS = {"cd", "export", "exec", "set", "unset", ".", "source", "eval", ":", "true", "false"}
 
 
-def run_command(
-    cmd: Iterable[str],
+@dataclass(frozen=True)
+class Result:
+    rc: int
+    stdout: str = ""
+    pid: int | None = None
+
+
+def _merged_env(env: dict[str, str] | None) -> dict[str, str] | None:
+    if not env:
+        return None
+    merged = dict(os.environ)
+    merged.update(env)
+    return merged
+
+
+def run(
+    cmd: str,
     *,
-    cwd: Path | None = None,
-    dry_run: bool = False,
+    cwd: Path | str,
     env: dict[str, str] | None = None,
-    logger=None,
-) -> subprocess.CompletedProcess[str]:
-    cmd_list = [str(part) for part in cmd]
-    cmd_display = _format_command(cmd_list)
-    guard_text(cmd_display)
+    mode: str = "stream",
+    log_file: Path | None = None,
+    dry_run: bool = False,
+) -> Result:
+    """Run ``cmd`` through the shell in ``cwd``; ``env`` is added to the inherited environment."""
+    if mode not in MODES:
+        raise ValueError(f"unknown mode {mode!r} (expected one of {', '.join(MODES)})")
+    if mode == "detach" and log_file is None:
+        raise ValueError("detach mode needs a log_file")
+    guard_text(cmd)
 
     if dry_run:
-        if logger:
-            logger.info(f"WOULD RUN: {cmd_display}")
-        return subprocess.CompletedProcess(cmd_list, 0, "", "")
+        print(f"WOULD RUN {cmd}", flush=True)
+        return Result(rc=0)
 
-    result = subprocess.run(
-        cmd_list,
-        cwd=str(cwd) if cwd else None,
-        env=env,
-        text=True,
-        capture_output=True,
-    )
+    full_env = _merged_env(env)
+    cwd = str(cwd)
 
-    if logger:
-        if result.stdout:
-            logger.info(f"STDOUT: {result.stdout.strip()}")
-        if result.stderr:
-            logger.warn(f"STDERR: {result.stderr.strip()}")
+    if mode == "stream":
+        sys.stdout.flush()
+        sys.stderr.flush()
+        completed = subprocess.run(cmd, shell=True, cwd=cwd, env=full_env)
+        return Result(rc=completed.returncode)
 
-    if result.returncode != 0:
-        stdout = redact(result.stdout.strip()) if result.stdout else ""
-        stderr = redact(result.stderr.strip()) if result.stderr else ""
-        message = f"Command failed ({result.returncode}): {cmd_display}"
-        if stdout:
-            message += f" | stdout: {stdout}"
-        if stderr:
-            message += f" | stderr: {stderr}"
-        raise ProcessError(message)
+    if mode == "capture":
+        completed = subprocess.run(cmd, shell=True, cwd=cwd, env=full_env, capture_output=True, text=True)
+        if completed.returncode == 0:
+            return Result(rc=0, stdout=completed.stdout)
+        output = "\n".join(part.strip() for part in (completed.stdout, completed.stderr) if part and part.strip())
+        return Result(rc=completed.returncode, stdout=redact(output))
 
-    return result
+    log_path = Path(log_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("ab") as handle:
+        proc = subprocess.Popen(
+            cmd,
+            shell=True,
+            cwd=cwd,
+            env=full_env,
+            stdin=subprocess.DEVNULL,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    return Result(rc=0, pid=proc.pid)
+
+
+def _reap(pid: int) -> None:
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        pass
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def kill_group(pid: int, grace: float = 10) -> None:
+    """SIGTERM the process group led by ``pid``; SIGKILL whatever is left after ``grace`` seconds."""
+    if not isinstance(pid, int) or pid <= 1:
+        raise ValueError(f"refusing to signal process group {pid!r}")
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        _reap(pid)
+        if not _group_alive(pid):
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    for _ in range(40):
+        _reap(pid)
+        if not _group_alive(pid):
+            return
+        time.sleep(0.05)
+
+
+def executable_of(cmd: str) -> str | None:
+    """The first word of a shell command, skipping leading VAR=value assignments."""
+    try:
+        words = shlex.split(cmd)
+    except ValueError:
+        words = cmd.split()
+    for word in words:
+        if "=" in word and not word.startswith(("/", ".")) and word.split("=", 1)[0].isidentifier():
+            continue
+        return word
+    return None
+
+
+def require_tools(commands: Iterable[str]) -> None:
+    """Raise ``ToolMissing`` naming the first command's executable that is not on PATH."""
+    for cmd in commands:
+        tool = executable_of(cmd)
+        if tool is None or tool in _SHELL_BUILTINS:
+            continue
+        if "/" in tool:
+            if not os.access(tool, os.X_OK):
+                raise ToolMissing(tool)
+        elif shutil.which(tool) is None:
+            raise ToolMissing(tool)
