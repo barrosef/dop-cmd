@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import textwrap
 from pathlib import Path
 
@@ -15,7 +16,6 @@ EXAMPLE = textwrap.dedent(
     default_environment = "local"
 
     [environments.local]
-    dir = "repos/dop-infra"
     kubeconfig = "k3d kubeconfig write dop-local"
     namespace = "dop-local"
     cluster_exists = "k3d cluster list dop-local"
@@ -81,6 +81,9 @@ def write_config(tmp_path: Path):
     def _write(text: str = EXAMPLE, name: str = "dop.toml") -> Path:
         path = tmp_path / name
         path.write_text(textwrap.dedent(text), encoding="utf-8")
+        # Every declared `repo` must exist at load time (QA D5): make them.
+        for repo in re.findall(r'^\s*repo\s*=\s*"([^"]+)"', text, re.MULTILINE):
+            (tmp_path / repo).mkdir(parents=True, exist_ok=True)
         return path
 
     return _write

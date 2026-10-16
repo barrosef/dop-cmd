@@ -2,7 +2,8 @@
 
 - `cluster`: the component's `logs` command, streamed, with the environment's
   `KUBECONFIG`, from the project root.
-- `process`: `tail -f` of the log `dop` keeps; never started -> exit 3.
+- `process`: `tail -f` of the log `dop` keeps; never started -> exit 3; not
+  running -> its last 20 lines, "is not running", exit 3.
 - `none`: nothing to follow -> exit 3.
 
 Ctrl-C ends the follow with exit 0; a follow that ends with a non-zero return
@@ -21,6 +22,8 @@ from ..core import process
 from ..core.errors import ProcessError
 from ..kube import Kube
 from ..processes import ProcessManager
+
+TAIL_LINES = 20
 
 
 def _follow(runner: Callable[..., process.Result], cmd: str, config: Config, env: dict[str, str] | None, dry_run: bool) -> int:
@@ -60,13 +63,20 @@ def run(
         if not dry_run and not log.exists():
             print(f"dop logs: {component.name} was never started (no {log})", flush=True)
             return 3
+        if not dry_run and processes.alive(component, cleanup=False) is None:
+            # A dead process has nothing to follow: show where it ended, never `tail -f` it.
+            lines = log.read_text(encoding="utf-8", errors="replace").splitlines()[-TAIL_LINES:]
+            for line in lines:
+                print(line, flush=True)
+            print(f"dop logs: {component.name} is not running", flush=True)
+            return 3
         return _follow(runner, f"tail -f {shlex.quote(str(log))}", config, None, dry_run)
 
     if not component.logs:
         print(f"dop logs: {component.name} declares no logs command; nothing to follow", flush=True)
         return 3
     if not dry_run:
-        (tool_check or process.require_tools)(environment_tools(config.environment, "kubeconfig") + [component.logs])
+        (tool_check or process.tool_checker(config.root))(environment_tools(config.environment, "kubeconfig") + [component.logs])
     driver = driver_for(config, runner=runner, kube_factory=kube_factory, dry_run=dry_run)
     try:
         env = {"KUBECONFIG": driver.kubeconfig_path()}

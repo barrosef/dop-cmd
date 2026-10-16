@@ -67,13 +67,21 @@ def process_up(
     ready in time. A dead pid is never ready.
     """
     runner = runner or process.run
-    if not dry_run:
+    if dry_run:
+        pid = processes.alive(component, cleanup=False)
+        if pid is not None:
+            return f"already running, pid {pid}"
+    else:
         if component.ready and probe(component.ready) and processes.alive(component) is None:
             raise ProcessError("port held by a process dop does not own")
         pid = processes.alive(component)
         if pid is not None:
+            if component.ready and not probe(component.ready):
+                raise ProcessError(f"not ready: already running (pid {pid}) but {component.ready} does not answer")
             return f"already running, pid {pid}"
-        (tool_check or process.require_tools)([c for c in (component.setup, component.run) if c])
+        (tool_check or process.tool_checker(Path(root) / component.repo))(
+            [c for c in (component.setup, component.run) if c]
+        )
 
     if component.setup:
         result = runner(component.setup, cwd=Path(root) / component.repo, mode="stream", dry_run=dry_run)
@@ -92,9 +100,13 @@ def process_up(
             lambda: processes.alive(component) is not None,
         )
         if not ready:
-            if processes.alive(component) is None:
+            exited = processes.alive(component) is None
+            # Never leave a process that did not become ready behind: the next
+            # `up` would take it for "already running".
+            processes.stop(component, grace=5)
+            if exited:
                 raise ProcessError(f"process exited (see {log})")
-            raise ProcessError(f"not ready after {timeout:g}s (see {log})")
+            raise ProcessError(f"not ready after {timeout:g}s; stopped (see {log})")
         return f"ready, pid {pid}"
     if processes.alive(component) is None:
         raise ProcessError(f"process exited (see {log})")
@@ -149,7 +161,7 @@ def bring_up(
     environment = config.environment
 
     if needs_environment and not dry_run:
-        (tool_check or process.require_tools)(environment_tools(environment, *ENV_TOOLS))
+        (tool_check or process.tool_checker(config.root))(environment_tools(environment, *ENV_TOOLS))
 
     outcomes: list[Outcome] = []
     if needs_environment:

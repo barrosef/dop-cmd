@@ -19,10 +19,10 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .errors import ToolMissing
-from .security import guard_text, redact
+from .security import redact
 
 MODES = ("stream", "capture", "detach")
 
@@ -59,7 +59,8 @@ def run(
         raise ValueError(f"unknown mode {mode!r} (expected one of {', '.join(MODES)})")
     if mode == "detach" and log_file is None:
         raise ValueError("detach mode needs a log_file")
-    guard_text(cmd)
+    # A configured command is the project's own, not a secret dump: the guard
+    # applies to captured output (``redact``), never to the command itself.
 
     if dry_run:
         print(f"WOULD RUN {cmd}", flush=True)
@@ -152,14 +153,27 @@ def executable_of(cmd: str) -> str | None:
     return None
 
 
-def require_tools(commands: Iterable[str]) -> None:
-    """Raise ``ToolMissing`` naming the first command's executable that is not on PATH."""
+def require_tools(commands: Iterable[str], cwd: Path | str | None = None) -> None:
+    """Raise ``ToolMissing`` naming the first command's executable that is not available.
+
+    A first word containing ``/`` is a path, resolved against ``cwd`` (where the
+    command will run; dop's own cwd when None) and must be an executable file;
+    any other word must be on PATH.
+    """
     for cmd in commands:
         tool = executable_of(cmd)
         if tool is None or tool in _SHELL_BUILTINS:
             continue
         if "/" in tool:
-            if not os.access(tool, os.X_OK):
+            path = Path(tool).expanduser()
+            if not path.is_absolute():
+                path = Path(cwd if cwd is not None else Path.cwd()) / path
+            if not (path.is_file() and os.access(path, os.X_OK)):
                 raise ToolMissing(tool)
         elif shutil.which(tool) is None:
             raise ToolMissing(tool)
+
+
+def tool_checker(cwd: Path | str) -> "Callable[[list[str]], None]":
+    """``require_tools`` bound to the directory the checked commands will run in."""
+    return lambda commands: require_tools(commands, cwd=cwd)

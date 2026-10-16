@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import os
 import sys
 from pathlib import Path
 
@@ -89,9 +90,24 @@ def _error(message: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
+    try:
+        return _main(parser, argv)
+    except BrokenPipeError:
+        # `dop … | head`: the reader left. Point stdout at devnull so the
+        # interpreter's final flush does not fail again, and end quietly.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except (OSError, ValueError):
+            pass
+        return EXIT_OK
+
+
+def _main(parser: argparse.ArgumentParser, argv: list[str] | None) -> int:
     args = parser.parse_args(argv)
     try:
-        path = Path(args.config).expanduser() if args.config else find_config(Path.cwd())
+        if args.config is not None and not args.config.strip():
+            raise ConfigError("empty config path: --config needs a path")
+        path = Path(args.config).expanduser() if args.config is not None else find_config(Path.cwd())
         config = load(path)
         module = importlib.import_module(f".verbs.{args.command}", __package__)
         return int(module.run(config, args))

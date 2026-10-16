@@ -36,7 +36,6 @@ def run(
 ) -> int:
     runner = runner or process.run
     killer = killer or process.kill_group
-    tool_check = tool_check or process.require_tools
     dry_run = bool(getattr(args, "dry_run", False))
     layer_name = getattr(args, "layer", None) or DEFAULT_LAYER
 
@@ -58,9 +57,9 @@ def run(
 
     if not dry_run:
         needed = ([component.setup] if component.setup else []) + list(layer.commands)
+        (tool_check or process.tool_checker(component.repo))(needed)
         if environment is not None:
-            needed += [environment.kubeconfig, "kubectl"]
-        tool_check(needed)
+            (tool_check or process.tool_checker(config.root))([environment.kubeconfig, "kubectl"])
 
     if component.setup:
         result = runner(component.setup, cwd=component.repo, mode="stream", dry_run=dry_run)

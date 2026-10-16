@@ -34,7 +34,11 @@ One file, one project. All paths are relative to the file. **Unknown keys
 anywhere are a configuration error (exit 2)**, and so are an unknown `kind`, an
 unknown `needs`, a dependency cycle, a `process` without `run`, a `cluster`
 without `workloads`, and a test layer other than `unit`, `integration` or
-`contract`.
+`contract`. Keys must fit the `kind` (`none` takes only `repo`, `kind`, `needs`,
+`setup`, `test`; `process` no `workloads`/`logs`; `cluster` no `run`/`env`),
+`workloads` are `deploy|deployment|sts|statefulset/<name>`, `needs` has no
+duplicates, every `repo` must be an existing directory, and an environment must
+declare `kubeconfig`, `namespace`, `up`, `down` and the five `cluster_*` commands.
 
 ```toml
 [project]
@@ -43,7 +47,6 @@ state_dir = ".dop"                    # lock, pid files and process logs; gitign
 default_environment = "local"         # the only one today; the table is plural so a later GCP verb adds a row, not a migration
 
 [environments.local]
-dir = "repos/dop-infra"
 kubeconfig = "k3d kubeconfig write dop-local"      # stdout = path; every make/kubectl runs with KUBECONFIG=<path>
 namespace = "dop-local"
 cluster_exists = "k3d cluster list dop-local"      # exit 0 = exists

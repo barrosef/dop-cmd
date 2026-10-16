@@ -6,7 +6,11 @@ under the state directory record the `process` components `dop` started.
 
 from __future__ import annotations
 
+import json
+import re
 import os
+import subprocess
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator
@@ -59,6 +63,66 @@ def _read_pid(path: Path) -> int | None:
     except OSError:
         return None
     return int(text) if text.isdigit() and int(text) > 0 else None
+
+
+def _ps(field: str, pid: int) -> str | None:
+    """``ps -o <field>= -p <pid>`` (POSIX, so Linux and macOS alike); None when ps is unavailable or has no such process."""
+    try:
+        done = subprocess.run(
+            ["ps", "-o", f"{field}=", "-p", str(pid)], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = done.stdout.strip()
+    return out if done.returncode == 0 and out else None
+
+
+def _executables(cmd: str) -> list[str]:
+    """Executable names of a shell command: the first word of each `&&`/`||`/`;`/`|` segment, basenames, first segment first.
+
+    A shell that execs the last command of ``a && b`` shows ``b`` in ``ps``, so the
+    first word alone would call a live process a stranger.
+    """
+    names: list[str] = []
+    for segment in re.split(r"&&|\|\||[;|\n]", cmd):
+        exe = process.executable_of(segment)
+        if exe and os.path.basename(exe) not in names:
+            names.append(os.path.basename(exe))
+    return names
+
+
+def _read_record(path: Path) -> dict | None:
+    """The pid file: JSON ``{pid, exe, started}``; a bare pid (older file) reads as a record with no identity."""
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if text.isdigit():
+        return {"pid": int(text)} if int(text) > 0 else None
+    try:
+        record = json.loads(text)
+    except ValueError:
+        return None
+    pid = record.get("pid") if isinstance(record, dict) else None
+    return record if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+
+
+def _identity_ok(record: dict) -> bool:
+    """A pid is trusted only while the process behind it still looks like the one `dop` started."""
+    pid = record["pid"]
+    if not _pid_alive(pid):
+        return True  # only the group's other members remain; the kernel does not reuse a pid that is a live group id
+    exes = record.get("exes") or ([record["exe"]] if record.get("exe") else [])
+    if exes:
+        args = _ps("args", pid)
+        if args is not None and not any(exe in args for exe in exes):
+            return False
+    started = record.get("lstart")
+    if started:
+        now = _ps("lstart", pid)
+        if now is not None and now != started:
+            return False
+    return True
 
 
 class ProcessManager:
@@ -125,7 +189,8 @@ class ProcessManager:
         if not component.run:
             raise ProcessError(f"{component.name} declares no run command")
         runner = runner or process.run
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        if not dry_run:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
         result = runner(
             component.run,
             cwd=Path(root) / component.repo,
@@ -138,7 +203,15 @@ class ProcessManager:
             return None
         if result.rc != 0 or result.pid is None:
             raise ProcessError(f"could not start {component.name} (rc {result.rc}): {component.run}")
-        self.pid_path(component).write_text(f"{result.pid}\n", encoding="utf-8")
+        exes = _executables(component.run)
+        record = {
+            "pid": result.pid,
+            "exe": exes[0] if exes else None,
+            "exes": exes,
+            "lstart": _ps("lstart", result.pid),
+            "written": time.time(),
+        }
+        self.pid_path(component).write_text(json.dumps(record) + "\n", encoding="utf-8")
         return result.pid
 
     def alive(self, component: Component, *, cleanup: bool = True) -> int | None:
@@ -147,9 +220,9 @@ class ProcessManager:
         A stale pid file is removed unless ``cleanup`` is False (read-only callers).
         """
         path = self.pid_path(component)
-        pid = _read_pid(path)
-        if pid is not None and _exists(pid):
-            return pid
+        record = _read_record(path)
+        if record is not None and _exists(record["pid"]) and _identity_ok(record):
+            return record["pid"]
         if cleanup:
             try:
                 path.unlink()

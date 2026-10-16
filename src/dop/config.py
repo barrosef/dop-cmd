@@ -7,6 +7,7 @@ Every error here is a `ConfigError`, which the CLI turns into exit code 2.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import tomllib
@@ -25,7 +26,6 @@ DEFAULT_WAIT_TIMEOUT = "240s"
 
 _PROJECT_KEYS = {"name", "state_dir", "default_environment"}
 _ENVIRONMENT_KEYS = {
-    "dir",
     "kubeconfig",
     "namespace",
     "cluster_exists",
@@ -41,6 +41,17 @@ _ENVIRONMENT_KEYS = {
     "wait_timeout",
     "addresses",
 }
+_ENVIRONMENT_REQUIRED = (
+    "kubeconfig",
+    "namespace",
+    "up",
+    "down",
+    "cluster_exists",
+    "cluster_running",
+    "cluster_up",
+    "cluster_start",
+    "cluster_stop",
+)
 _COMPONENT_KEYS = {
     "repo",
     "kind",
@@ -54,6 +65,13 @@ _COMPONENT_KEYS = {
     "logs",
     "test",
 }
+# Keys a `kind` cannot carry: they would be accepted and silently never used.
+_KIND_FORBIDDEN = {
+    "none": {"run", "env", "ready", "address", "workloads", "logs"},
+    "process": {"workloads", "logs"},
+    "cluster": {"run", "env"},
+}
+_WORKLOAD = re.compile(r"^(deploy|deployment|sts|statefulset)/[a-z0-9-]+$")
 _LAYER_TABLE_KEYS = {"forwards", "commands"}
 _TOP_KEYS = {"project", "environments", "components"}
 
@@ -70,17 +88,16 @@ class Project:
 
 @dataclass(frozen=True)
 class Environment:
-    dir: Path
     kubeconfig: str
     namespace: str
-    cluster_exists: str | None = None
-    cluster_running: str | None = None
-    cluster_up: str | None = None
-    cluster_start: str | None = None
-    cluster_stop: str | None = None
+    cluster_exists: str
+    cluster_running: str
+    cluster_up: str
+    cluster_start: str
+    cluster_stop: str
+    up: str
+    down: str
     prepare: list[str] = field(default_factory=list)
-    up: str | None = None
-    down: str | None = None
     status: str | None = None
     workloads: list[str] = field(default_factory=list)
     wait_timeout: float = 240.0
@@ -125,18 +142,27 @@ class Config:
 # --------------------------------------------------------------------------- discovery
 
 
+def _is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def find_config(cwd: Path | None = None) -> Path:
     """Return the `dop.toml` to use: `$DOP_CONFIG`, else the nearest one upwards."""
     override = os.environ.get(CONFIG_ENV_VAR)
-    if override:
+    if override is not None:
+        if not override.strip():
+            raise ConfigError(f"empty config path: {CONFIG_ENV_VAR} is set but empty")
         path = Path(override).expanduser()
-        if not path.is_file():
+        if not _is_file(path):
             raise ConfigError(f"{CONFIG_ENV_VAR} points to {path}, which is not a file")
         return path.resolve()
     start = Path(cwd if cwd is not None else Path.cwd()).resolve()
     for directory in (start, *start.parents):
         candidate = directory / CONFIG_FILENAME
-        if candidate.is_file():
+        if _is_file(candidate):
             return candidate
     raise ConfigError(f"no {CONFIG_FILENAME} found in {start} or any parent directory")
 
@@ -149,13 +175,16 @@ def parse_duration(value: Any, where: str) -> float:
     if isinstance(value, bool):
         raise ConfigError(f"{where}: expected a duration like \"240s\", got {value!r}")
     if isinstance(value, (int, float)):
-        seconds = float(value)
+        try:
+            seconds = float(value)
+        except OverflowError:
+            raise ConfigError(f"{where}: duration is out of range, got {value!r}") from None
     elif isinstance(value, str) and (match := _DURATION.match(value)):
         seconds = float(match.group(1)) * _DURATION_UNITS[match.group(2)]
     else:
         raise ConfigError(f"{where}: expected a duration like \"240s\", got {value!r}")
-    if seconds <= 0:
-        raise ConfigError(f"{where}: duration must be positive, got {value!r}")
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ConfigError(f"{where}: duration must be a finite number above zero, got {value!r}")
     return seconds
 
 
@@ -191,6 +220,17 @@ def _str_list(table: dict[str, Any], key: str, where: str) -> list[str]:
     return list(value)
 
 
+def _workloads(table: dict[str, Any], where: str) -> list[str]:
+    refs = _str_list(table, "workloads", where)
+    for ref in refs:
+        if not _WORKLOAD.match(ref):
+            raise ConfigError(
+                f"{where}.workloads: '{ref}' is not <kind>/<name> (kind: deploy, deployment, sts or statefulset; "
+                "name: lowercase letters, digits and dashes)"
+            )
+    return refs
+
+
 # --------------------------------------------------------------------------- sections
 
 
@@ -207,20 +247,12 @@ def _load_environment(name: str, raw: Any, root: Path) -> Environment:
     where = f"[environments.{name}]"
     table = _table(raw, where)
     _check_keys(table, _ENVIRONMENT_KEYS, where)
+    required = {key: _str(table, key, where, required=True) for key in _ENVIRONMENT_REQUIRED}
     return Environment(
-        dir=root / (_str(table, "dir", where) or "."),
-        kubeconfig=_str(table, "kubeconfig", where, required=True),
-        namespace=_str(table, "namespace", where, required=True),
-        cluster_exists=_str(table, "cluster_exists", where),
-        cluster_running=_str(table, "cluster_running", where),
-        cluster_up=_str(table, "cluster_up", where),
-        cluster_start=_str(table, "cluster_start", where),
-        cluster_stop=_str(table, "cluster_stop", where),
+        **required,
         prepare=_str_list(table, "prepare", where),
-        up=_str(table, "up", where),
-        down=_str(table, "down", where),
         status=_str(table, "status", where),
-        workloads=_str_list(table, "workloads", where),
+        workloads=_workloads(table, where),
         wait_timeout=parse_duration(table.get("wait_timeout", DEFAULT_WAIT_TIMEOUT), f"{where}.wait_timeout"),
         addresses=_str_list(table, "addresses", where),
     )
@@ -253,21 +285,31 @@ def _load_component(name: str, raw: Any, root: Path) -> Component:
     kind = _str(table, "kind", where, required=True)
     if kind not in KINDS:
         raise ConfigError(f"{where}.kind: unknown kind '{kind}' (expected one of {', '.join(KINDS)})")
+    forbidden = sorted(set(table) & _KIND_FORBIDDEN[kind])
+    if forbidden:
+        raise ConfigError(f"{where}: key(s) {', '.join(forbidden)} make no sense for kind '{kind}'")
+    needs = _str_list(table, "needs", where)
+    duplicated = sorted({n for n in needs if needs.count(n) > 1})
+    if duplicated:
+        raise ConfigError(f"{where}.needs: duplicate entr{'ies' if len(duplicated) > 1 else 'y'} {', '.join(duplicated)}")
+    repo = root / _str(table, "repo", where, required=True)
+    if not repo.is_dir():
+        raise ConfigError(f"{where}.repo: {repo} does not exist or is not a directory")
     env_raw = table.get("env", {})
     if not isinstance(env_raw, dict) or not all(isinstance(v, str) for v in env_raw.values()):
         raise ConfigError(f"{where}.env: expected a table of string values")
     tests_raw = _table(table.get("test", {}), f"{where}.test")
     component = Component(
         name=name,
-        repo=root / _str(table, "repo", where, required=True),
+        repo=repo,
         kind=kind,
-        needs=_str_list(table, "needs", where),
+        needs=needs,
         setup=_str(table, "setup", where),
         run=_str(table, "run", where),
         env=dict(env_raw),
         ready=_str(table, "ready", where),
         address=_str(table, "address", where),
-        workloads=_str_list(table, "workloads", where),
+        workloads=_workloads(table, where),
         logs=_str(table, "logs", where),
         tests={layer: _load_layer(name, layer, value) for layer, value in tests_raw.items()},
     )
@@ -308,12 +350,20 @@ def _check_graph(components: dict[str, Component]) -> None:
 
 def load(path: Path) -> Config:
     """Read and validate a `dop.toml`; any problem raises `ConfigError`."""
-    path = Path(path).resolve()
     try:
+        path = Path(path).resolve()
         with path.open("rb") as handle:
             raw = tomllib.load(handle)
     except FileNotFoundError:
         raise ConfigError(f"{path}: no such file") from None
+    except IsADirectoryError:
+        raise ConfigError(f"{path}: is a directory, not a dop.toml") from None
+    except PermissionError:
+        raise ConfigError(f"{path}: permission denied") from None
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{path}: not valid UTF-8 ({exc.reason} at byte {exc.start})") from None
+    except (OSError, RuntimeError) as exc:
+        raise ConfigError(f"{path}: cannot be read: {getattr(exc, 'strerror', None) or exc}") from None
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from None
     root = path.parent

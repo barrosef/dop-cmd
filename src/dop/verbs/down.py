@@ -77,7 +77,7 @@ def run(
         # Exactly the commands `down` runs: the state probes, the kubeconfig it
         # hands to `cluster_stop`, and `cluster_stop` itself. `down` runs no
         # kubectl of its own, so `kubectl` is not required here.
-        (tool_check or process.require_tools)(
+        (tool_check or process.tool_checker(config.root))(
             [c for c in (env.cluster_exists, env.cluster_running, env.kubeconfig, env.cluster_stop) if c]
         )
 

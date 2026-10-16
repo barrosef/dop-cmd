@@ -84,7 +84,7 @@ def run(
     driver = driver_for(config, runner=runner, kube_factory=kube_factory, dry_run=dry_run)
     if not dry_run:
         fields = ["kubeconfig", "cluster_exists", "cluster_running"] + (["status"] if verbose else [])
-        (tool_check or process.require_tools)(environment_tools(environment, *fields))
+        (tool_check or process.tool_checker(config.root))(environment_tools(environment, *fields))
 
     try:
         cluster = driver.state()

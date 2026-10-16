@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import argparse
 import dataclasses
 
@@ -82,6 +83,7 @@ def test_process_tails_its_log(example_config):
     pm = ProcessManager(config.project.state_dir)
     pm.state_dir.mkdir(parents=True)
     pm.log_path(config.components["app"]).write_text("line\n")
+    pm.pid_path(config.components["app"]).write_text(f"{os.getpid()}\n")  # alive: this very test
     seen = []
 
     def run(cmd, **kw):
@@ -97,6 +99,7 @@ def test_process_tail_really_follows_and_ctrl_c_is_exit_0(example_config):
     pm = ProcessManager(config.project.state_dir)
     pm.state_dir.mkdir(parents=True)
     pm.log_path(config.components["app"]).write_text("line\n")
+    pm.pid_path(config.components["app"]).write_text(f"{os.getpid()}\n")  # alive: this very test
 
     def run(cmd, **kw):
         assert cmd.startswith("tail -f ")

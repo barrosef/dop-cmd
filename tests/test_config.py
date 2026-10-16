@@ -17,6 +17,13 @@ default_environment = "local"
 [environments.local]
 kubeconfig = "echo /k"
 namespace = "ns"
+up = "true"
+down = "true"
+cluster_exists = "true"
+cluster_running = "true"
+cluster_up = "true"
+cluster_start = "true"
+cluster_stop = "true"
 '''
 
 
@@ -28,7 +35,6 @@ def test_loads_the_spec_example(example_config: Path):
     assert config.project.state_dir == root / ".dop"
     env = config.environment
     assert env.namespace == "dop-local"
-    assert env.dir == root / "repos/dop-infra"
     assert env.wait_timeout == 240.0
     assert env.prepare == ["make -C repos/dop-infra images", "make -C repos/dop-infra image-runner"]
     assert set(config.components) == {"app", "bff", "core", "cli"}

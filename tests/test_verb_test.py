@@ -89,7 +89,7 @@ def test_layer_with_forwards_opens_runs_and_closes(example_config):
         ("close", 1001),
         ("close", 1002),
     ]
-    assert "kubectl" in r.calls[0][1]
+    assert any("kubectl" in c[1] for c in r.calls if c[0] == "tools")
 
 
 def test_first_failure_stops_and_forwards_still_close(example_config):
@@ -164,6 +164,13 @@ default_environment = "local"
 [environments.local]
 kubeconfig = "echo /k"
 namespace = "ns"
+up = "true"
+down = "true"
+cluster_exists = "true"
+cluster_running = "true"
+cluster_up = "true"
+cluster_start = "true"
+cluster_stop = "true"
 [components.w]
 repo = "w"
 kind = "none"

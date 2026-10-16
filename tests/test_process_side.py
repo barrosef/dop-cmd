@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import os
 import time
 
@@ -70,7 +71,8 @@ def test_start_writes_pid_and_log_and_the_process_lives(env):
     config, pm = env
     app = _app(config, run="echo hello-from-app; sleep 30", env={"GREETING": "x"})
     pid = pm.start(app, root=config.root)
-    assert pm.pid_path(app).read_text().strip() == str(pid)
+    record = json.loads(pm.pid_path(app).read_text())
+    assert record["pid"] == pid and record["exe"] == "echo"
     assert pm.log_path(app) == config.project.state_dir / "app.log"
     assert pm.alive(app) == pid
     assert _wait_for(lambda: "hello-from-app" in pm.log_path(app).read_text())
@@ -228,7 +230,8 @@ def test_not_ready_in_time_is_failed(env):
     app = _app(config, setup=None, run="sleep 30")
     with pytest.raises(ProcessError, match=r"not ready after 0\.3s"):
         _up_process(config, pm, app, timeout=0.3)
-    assert pm.alive(app) is not None  # left running; `dop down` stops it
+    assert pm.alive(app) is None  # W1: a process that never became ready is stopped, not left behind
+    assert not pm.pid_path(app).exists()
 
 
 def test_without_a_ready_url_done_once_alive(env):
@@ -478,4 +481,4 @@ def test_reset_hands_the_real_tool_check_to_the_up_that_follows(env):
               ready_wait=lambda *a: True, processes=pm,
               probe=lambda url: pm.alive(app, cleanup=False) is not None, waiter=fast_waiter)
     assert [app.setup, app.run] in seen  # process_up's own check ran with it
-    assert app.setup in seen[0] and app.run in seen[0]  # and the upfront one covered it
+    assert any(app.setup in call and app.run in call for call in seen)  # and the upfront one covered it
