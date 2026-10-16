@@ -1,20 +1,24 @@
-"""Custom errors for MCP CLI."""
+"""Custom errors for the dop CLI."""
 
 
 class MCPError(Exception):
-    """Base error for MCP CLI."""
+    """Base error for the dop CLI."""
 
 
 class ConfigError(MCPError):
-    """Configuration error."""
+    """Configuration or usage error (exit 2)."""
+
+
+class ToolMissing(MCPError):
+    """A named executable a command needs is not on PATH (exit 2)."""
+
+    def __init__(self, tool: str) -> None:
+        super().__init__(f"required tool not found on PATH: {tool}")
+        self.tool = tool
 
 
 class ValidationError(MCPError):
     """Validation error."""
-
-
-class StateError(MCPError):
-    """State management error."""
 
 
 class SecurityViolationError(MCPError):

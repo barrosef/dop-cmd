@@ -42,5 +42,17 @@ flags extras.
 
 ## Detalhes do schema
 
-A referência completa de campos está em
-[`reference/configuration.md`](../reference/configuration.md).
+A referência de campos desta versão foi removida; o modelo atual está no `README.md` e no ADR-0016.
+
+## Amendment — 2026-10-16 (ADR-0016)
+
+Still holds: TOML parsed with `tomllib` into typed dataclasses; discovery from
+the current directory; `DOP_CONFIG` overrides.
+
+Changed by the readaptation: there are no workspaces and no user-level config.
+**One `dop.toml` per project**, committed at the project root and found by
+walking up from the current directory (`src/dop/config.py`). The loader is no
+longer lenient: unknown keys at any level are a configuration error (exit 2).
+The schema is `[project]`, `[environments.<name>]` and `[components.<name>]`
+(see ADR-0016 and the README). The `--workspace` flag and
+`~/.config/dop/config.toml` are gone.
