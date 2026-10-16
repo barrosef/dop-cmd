@@ -7,7 +7,7 @@ components, their `needs` closure, and the environment if any of them is a
 1. Cluster: absent → `cluster_up` + every `prepare`; stopped → `cluster_start`.
 2. Environment: `up`, then a rollout wait on the environment's own `workloads`.
 3. Components in dependency order: `cluster` → rollout wait on its `workloads`,
-   then the `ready` probe if declared; `process` → `process_up` (S0c);
+   then the `ready` probe if declared; `process` → `process_up` (setup, detach `run`, probe `ready` while the pid lives);
    `none` → nothing to bring up.
 4. One line per unit (outcome, address), then the environment's `addresses`.
 
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from ..cluster import ClusterDriver, driver_for, environment_tools
@@ -41,12 +42,61 @@ class Outcome:
     detail: str = ""
 
 
-def process_up(component: Component, *, processes: ProcessManager, dry_run: bool) -> str:
+def _wait_alive(fn: Callable[[], bool], timeout: float, alive: Callable[[], bool]) -> bool:
+    return wait_until(fn, timeout, alive=alive)
+
+
+def process_up(
+    component: Component,
+    *,
+    processes: ProcessManager,
+    root: Path,
+    timeout: float,
+    dry_run: bool,
+    runner: Callable[..., process.Result] | None = None,
+    tool_check: Callable[[list[str]], None] | None = None,
+    probe: Callable[[str], bool] = http_ready,
+    waiter: Callable[[Callable[[], bool], float, Callable[[], bool]], bool] = _wait_alive,
+) -> str:
     """Start a `process` component and wait until it is ready; return a detail line.
 
-    The process side (setup, detach, port-held and dead-pid cases) is S0c.
+    Raises ``ProcessError`` (the unit is *failed*) when the port is held by a
+    process `dop` does not own, setup fails, the process dies, or it is not
+    ready in time. A dead pid is never ready.
     """
-    raise NotImplementedError("S0c")
+    runner = runner or process.run
+    if not dry_run:
+        if component.ready and probe(component.ready) and processes.alive(component) is None:
+            raise ProcessError("port held by a process dop does not own")
+        pid = processes.alive(component)
+        if pid is not None:
+            return f"already running, pid {pid}"
+        (tool_check or process.require_tools)([c for c in (component.setup, component.run) if c])
+
+    if component.setup:
+        result = runner(component.setup, cwd=Path(root) / component.repo, mode="stream", dry_run=dry_run)
+        if result.rc != 0:
+            raise ProcessError(f"setup failed (rc {result.rc}): {component.setup}")
+    pid = processes.start(component, root=root, runner=runner, dry_run=dry_run)
+    if dry_run:
+        if component.ready:
+            print(f"WOULD WAIT ready {component.ready}", flush=True)
+        return ""
+    log = processes.log_path(component)
+    if component.ready:
+        ready = waiter(
+            lambda: probe(component.ready),
+            timeout,
+            lambda: processes.alive(component) is not None,
+        )
+        if not ready:
+            if processes.alive(component) is None:
+                raise ProcessError(f"process exited (see {log})")
+            raise ProcessError(f"not ready after {timeout:g}s (see {log})")
+        return f"ready, pid {pid}"
+    if processes.alive(component) is None:
+        raise ProcessError(f"process exited (see {log})")
+    return f"started, pid {pid}"
 
 
 def _ready_wait(url: str, timeout: float, dry_run: bool) -> bool:
@@ -87,6 +137,9 @@ def bring_up(
     dry_run: bool,
     ready_wait: Callable[[str, float, bool], bool] = _ready_wait,
     tool_check: Callable[[list[str]], None] | None = None,
+    runner: Callable[..., process.Result] | None = None,
+    probe: Callable[[str], bool] = http_ready,
+    waiter: Callable[..., bool] = _wait_alive,
 ) -> int:
     """§3.1 without the lock (`reset` calls it while holding its own)."""
     components = closure(config, names or list(config.components))
@@ -120,10 +173,11 @@ def bring_up(
             outcome = _cluster_up(component, driver, environment.wait_timeout, dry_run, ready_wait)
         else:
             try:
-                detail = process_up(component, processes=processes, dry_run=dry_run)
+                detail = process_up(
+                    component, processes=processes, root=config.root, timeout=environment.wait_timeout,
+                    dry_run=dry_run, runner=runner, tool_check=tool_check, probe=probe, waiter=waiter,
+                )
                 outcome = Outcome(component.name, DONE, component.address, detail)
-            except NotImplementedError as exc:
-                outcome = Outcome(component.name, FAILED, component.address, f"process start not implemented yet ({exc})")
             except ProcessError as exc:
                 outcome = Outcome(component.name, FAILED, component.address, str(exc))
         status[component.name] = outcome.outcome
@@ -163,6 +217,8 @@ def run(
     tool_check: Callable[[list[str]], None] | None = None,
     ready_wait: Callable[[str, float, bool], bool] = _ready_wait,
     processes: ProcessManager | None = None,
+    probe: Callable[[str], bool] = http_ready,
+    waiter: Callable[..., bool] = _wait_alive,
 ) -> int:
     dry_run = bool(getattr(args, "dry_run", False))
     names = list(getattr(args, "components", None) or [])
@@ -173,7 +229,7 @@ def run(
     def go() -> int:
         return bring_up(
             config, names, driver=driver, processes=processes, dry_run=dry_run,
-            ready_wait=ready_wait, tool_check=tool_check,
+            ready_wait=ready_wait, tool_check=tool_check, runner=runner, probe=probe, waiter=waiter,
         )
 
     if dry_run:

@@ -88,3 +88,22 @@ class Cluster:
 def ws(ref: str, ready: int, desired: int = 1) -> WorkloadState:
     kind, name = ref.split("/", 1)
     return WorkloadState(kind=kind, name=name, ready=ready, desired=desired)
+
+
+def mixed_runner(cluster):
+    """Cluster commands go to the scripted cluster; anything run inside `repos/dop-app` really runs (`/bin/sh` fakes)."""
+    from dop.core import process
+
+    def run(cmd, *, cwd, env=None, mode="stream", log_file=None, dry_run=False):
+        if "dop-app" in str(cwd):
+            return process.run(cmd, cwd=cwd, env=env, mode=mode, log_file=log_file, dry_run=dry_run)
+        return cluster.run(cmd, cwd=cwd, env=env, mode=mode, log_file=log_file, dry_run=dry_run)
+
+    return run
+
+
+def fast_waiter(fn, timeout, alive):
+    """`wait_until` with a short interval, for tests that really wait."""
+    from dop.probe import wait_until
+
+    return wait_until(fn, min(timeout, 5), interval=0.05, alive=alive)

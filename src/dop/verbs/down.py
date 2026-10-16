@@ -1,6 +1,7 @@
 """`dop down` — stops the app processes and the local cluster; data is kept.
 
-Every `process` component `dop` owns is stopped first (S0c), then the
+Every `process` component `dop` owns is stopped first (SIGTERM to the group,
+SIGKILL after 10 s, pid file removed), then the
 environment's `cluster_stop`. The next `dop up` finds the cluster stopped and
 runs `cluster_start`. Exit 0 on success, 1 on failure.
 """
@@ -18,23 +19,29 @@ from ..kube import Kube
 from ..processes import LockHeld, ProcessManager
 
 
-def stop_owned_processes(config: Config, *, processes: ProcessManager, dry_run: bool) -> list[str]:
-    """Stop every `process` component `dop` owns; return the names stopped. S0c."""
-    raise NotImplementedError("S0c")
+def stop_owned_processes(
+    config: Config, *, processes: ProcessManager, dry_run: bool, verb: str = "down", grace: float = 10
+) -> list[str]:
+    """Stop every `process` component `dop` owns (SIGTERM the group, SIGKILL after ``grace``); one line each.
+
+    Returns the names stopped (in dry-run, the names that would be).
+    """
+    owned = set(processes.owned())
+    stopped: list[str] = []
+    for component in config.components.values():
+        if component.kind != "process" or component.name not in owned:
+            continue
+        if dry_run:
+            if processes.alive(component, cleanup=False) is not None:
+                print(f"WOULD STOP {component.name}", flush=True)
+                stopped.append(component.name)
+        elif processes.stop(component, grace=grace):
+            print(f"dop {verb}: stopped {component.name}", flush=True)
+            stopped.append(component.name)
+    return stopped
 
 
-def stop_processes_or_note(config: Config, *, processes: ProcessManager, dry_run: bool, verb: str) -> None:
-    """Call the process hook; until S0c lands, say in one line that nothing was stopped."""
-    try:
-        stopped = stop_owned_processes(config, processes=processes, dry_run=dry_run)
-    except NotImplementedError:
-        print(f"dop {verb}: no owned processes stopped (the process side arrives in S0c)", flush=True)
-        return
-    for name in stopped:
-        print(f"dop {verb}: stopped {name}", flush=True)
-
-
-def stop_cluster(driver: ClusterDriver) -> int:
+def stop_cluster(driver: ClusterDriver, dry_run: bool = False) -> int:
     try:
         state = driver.state()
         if state == "absent":
@@ -47,6 +54,8 @@ def stop_cluster(driver: ClusterDriver) -> int:
     except ProcessError as exc:
         print(f"dop down: {exc}", flush=True)
         return 1
+    if dry_run:
+        return 0
     print("dop down: cluster stopped; data is kept", flush=True)
     return 0
 
@@ -69,8 +78,8 @@ def run(
         )
 
     def go() -> int:
-        stop_processes_or_note(config, processes=processes, dry_run=dry_run, verb="down")
-        rc = stop_cluster(driver)
+        stop_owned_processes(config, processes=processes, dry_run=dry_run)
+        rc = stop_cluster(driver, dry_run)
         return 0 if dry_run else rc
 
     if dry_run:

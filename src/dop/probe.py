@@ -1,6 +1,6 @@
 """Readiness probes: one HTTP answer, and a poll until something holds.
 
-Minimal on purpose; the process side (S0c) extends it.
+Minimal on purpose.
 """
 
 from __future__ import annotations

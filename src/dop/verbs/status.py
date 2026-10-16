@@ -4,8 +4,8 @@ Environment: cluster absent / stopped / running, namespace, every declared
 workload (the environment's and each `cluster` component's) with ready/desired
 from `kubectl get -o json`, the `addresses`. Then one line per component:
 kind, state (`ready | not ready | down | n/a`), address; for `cluster` each
-workload and the `ready` probe; for `process` the state the process side (S0c)
-reports.
+workload and the `ready` probe; for `process` the pid, the log path and
+whether the `ready` url answers.
 
 Exit: 0 all ready, 3 some not, 1 cluster absent or not running or kubectl
 failing, 2 missing tool. `-v` appends the environment's `status` output verbatim.
@@ -27,9 +27,28 @@ from ..processes import ProcessManager
 READY, NOT_READY, DOWN, NA, UNKNOWN = "ready", "not ready", "down", "n/a", "?"
 
 
-def process_state(component: Component, *, processes: ProcessManager) -> tuple[str, str]:
-    """(state, detail) of a `process` component: pid and log path. S0c."""
-    raise NotImplementedError("S0c")
+def process_state(
+    component: Component,
+    *,
+    processes: ProcessManager,
+    prober: Callable[[str, bool], bool] | None = None,
+    dry_run: bool = False,
+) -> tuple[str, str]:
+    """(state, detail) of a `process` component; read-only (a stale pid file is left alone).
+
+    ``ready`` when alive and the ``ready`` url (if any) answers; ``not ready``
+    when alive and it does not; ``down`` when not alive. The detail has the pid
+    and the log path.
+    """
+    prober = prober or _probe
+    log = processes.log_path(component)
+    pid = processes.alive(component, cleanup=False)
+    if pid is None:
+        return DOWN, f"log {log}" if log.exists() else ""
+    detail = f"pid {pid}  log {log}"
+    if component.ready and not prober(component.ready, dry_run):
+        return NOT_READY, detail
+    return READY, detail
 
 
 def _probe(url: str, dry_run: bool) -> bool:
@@ -98,7 +117,6 @@ def run(
 
     print("components")
     width = max([len(name) for name in config.components] + [4])
-    notes: list[str] = []
     for component in config.components.values():
         detail_lines: list[str] = []
         if component.kind == "none":
@@ -127,13 +145,9 @@ def run(
                     state = NOT_READY
             verdicts.append(state == READY)
         else:
-            try:
-                state, detail = process_state(component, processes=processes)
-                if detail:
-                    detail_lines.append(f"    {detail}")
-            except NotImplementedError:
-                state = UNKNOWN
-                notes.append(f"{component.name}: process state arrives in S0c")
+            state, detail = process_state(component, processes=processes, prober=prober, dry_run=dry_run)
+            if detail:
+                detail_lines.append(f"    {detail}")
             verdicts.append(state == READY)
         line = f"  {component.name:<{width}}  {component.kind:<8} {state:<10}"
         if component.address:
@@ -141,8 +155,6 @@ def run(
         print(line.rstrip())
         for detail in detail_lines:
             print(detail)
-    for note in notes:
-        print(f"note: {note}")
 
     if verbose:
         if cluster == "running":

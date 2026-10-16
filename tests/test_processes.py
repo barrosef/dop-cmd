@@ -44,10 +44,3 @@ def test_unreadable_file_is_stale(tmp_path, content):
     pm.lock_path.write_text(content)
     with pm.lock():
         assert pm.lock_path.read_text().strip() == str(os.getpid())
-
-
-def test_process_side_is_s0c(tmp_path):
-    pm = ProcessManager(tmp_path)
-    for method in (pm.start, pm.alive, pm.stop, pm.log_path):
-        with pytest.raises(NotImplementedError, match="S0c"):
-            method(None)

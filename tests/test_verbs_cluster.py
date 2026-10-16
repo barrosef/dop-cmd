@@ -11,7 +11,7 @@ from dop.core.errors import ToolMissing
 from dop.processes import ProcessManager
 from dop.verbs import down, reset, status, up
 
-from .fakes import EXISTS, KUBECONFIG, KUBECONFIG_CMD, RUNNING, Cluster, ws
+from .fakes import EXISTS, KUBECONFIG, KUBECONFIG_CMD, RUNNING, Cluster, fast_waiter, mixed_runner, ws
 
 ENV_WORKLOADS = ["sts/postgres", "sts/nats", "sts/firebase", "deploy/secretmanager"]
 
@@ -30,11 +30,12 @@ class Ready:
         return self.answers
 
 
-def _up(config, cluster, *components, dry_run=False, ready=None, tools=None):
+def _up(config, cluster, *components, dry_run=False, ready=None, tools=None, runner=None, probe=None):
     return up.run(
         config, _args(components, dry_run=dry_run),
-        runner=cluster.run, kube_factory=cluster.kube,
+        runner=runner or cluster.run, kube_factory=cluster.kube,
         tool_check=tools or (lambda commands: None), ready_wait=ready or Ready(),
+        probe=probe or (lambda url: False), waiter=fast_waiter,
     )
 
 
@@ -62,20 +63,31 @@ def test_up_bff_waits_core_before_bff_and_probes(example_config):
     assert not any("jaeger" in w for w in cluster.waits())
 
 
-def test_up_app_closure_and_process_is_reported_failed_until_s0c(example_config, capsys):
-    config = load(example_config)
+def test_up_app_closure_then_the_process(proc_config, capsys, reap_owned):
+    config = load(proc_config)
+    pm = ProcessManager(config.project.state_dir)
+    reap_owned((pm, config))
     cluster = Cluster("running")
-    assert _up(config, cluster, "app") == 3
+    answers = {"n": 0}
+
+    def probe(url):  # nothing answers before the start; the app answers once it is alive
+        answers["n"] += 1
+        return pm.alive(config.components["app"], cleanup=False) is not None
+
+    assert _up(config, cluster, "app", runner=mixed_runner(cluster), probe=probe) == 0
     assert cluster.waits() == ENV_WORKLOADS + ["deploy/dop-core-serve", "deploy/dop-api"]
     lines = capsys.readouterr().out.splitlines()
     app = next(line for line in lines if line.startswith("app"))
-    assert "failed" in app and "S0c" in app and "http://localhost:5173" in app
+    assert "done" in app and "http://localhost:5173" in app and "ready, pid" in app
 
 
-def test_up_no_args_brings_everything_in_order(example_config, capsys):
-    config = load(example_config)
+def test_up_no_args_brings_everything_in_order(proc_config, capsys, reap_owned):
+    config = load(proc_config)
+    pm = ProcessManager(config.project.state_dir)
+    reap_owned((pm, config))
     cluster = Cluster("running")
-    assert _up(config, cluster) == 3  # app's process side is S0c
+    probe = lambda url: pm.alive(config.components["app"], cleanup=False) is not None  # noqa: E731
+    assert _up(config, cluster, runner=mixed_runner(cluster), probe=probe) == 0
     assert cluster.waits() == ENV_WORKLOADS + ["deploy/dop-core-serve", "deploy/dop-api"]
     out = capsys.readouterr().out
     assert "nothing to bring up" in out
@@ -214,7 +226,7 @@ def test_down_stops_the_cluster_with_kubeconfig(example_config, capsys):
     assert cluster.commands()[-1] == "make -C repos/dop-infra cluster-stop"
     assert cluster.env_of("make -C repos/dop-infra cluster-stop") == [KUBECONFIG]
     out = capsys.readouterr().out
-    assert "S0c" in out and "data is kept" in out
+    assert "cluster stopped; data is kept" in out
     assert "make -C repos/dop-infra down" not in cluster.commands()
 
 
@@ -249,17 +261,19 @@ def test_down_refuses_a_held_lock(example_config, capsys):
 # --------------------------------------------------------------------------- reset
 
 
-def test_reset_runs_down_then_the_whole_up(example_config, capsys):
-    config = load(example_config)
+def test_reset_runs_down_then_the_whole_up(proc_config, capsys, reap_owned):
+    config = load(proc_config)
+    pm = ProcessManager(config.project.state_dir)
+    reap_owned((pm, config))
     cluster = Cluster("running")
-    rc = reset.run(config, _args(), runner=cluster.run, kube_factory=cluster.kube,
-                   tool_check=lambda commands: None, ready_wait=Ready())
-    assert rc == 3  # app's process side is S0c
+    rc = reset.run(config, _args(), runner=mixed_runner(cluster), kube_factory=cluster.kube,
+                   tool_check=lambda commands: None, ready_wait=Ready(),
+                   probe=lambda url: pm.alive(config.components["app"], cleanup=False) is not None, waiter=fast_waiter)
+    assert rc == 0
     commands = cluster.commands()
     assert commands.index("make -C repos/dop-infra down") < commands.index("make -C repos/dop-infra up")
     assert cluster.env_of("make -C repos/dop-infra down") == [KUBECONFIG]
     assert cluster.waits() == ENV_WORKLOADS + ["deploy/dop-core-serve", "deploy/dop-api"]
-    assert "S0c" in capsys.readouterr().out
     assert not (config.project.state_dir / "lock").exists()
 
 
@@ -302,10 +316,9 @@ def test_status_renders_environment_and_components(example_config, capsys):
     lines = out.splitlines()
     assert any(line.split()[:3] == ["core", "cluster", "ready"] for line in lines)
     assert any(line.split()[:2] == ["cli", "none"] and "n/a" in line for line in lines)
-    assert any(line.split()[:3] == ["app", "process", "?"] for line in lines)
-    assert "note: app: process state arrives in S0c" in out
+    assert any(line.split()[:3] == ["app", "process", "down"] for line in lines)
     assert "http://api.localtest.me:8080" in out
-    assert rc == 3  # app's state is unknown until S0c
+    assert rc == 3  # app is down
     assert "make -C repos/dop-infra status" not in cluster.commands()
 
 

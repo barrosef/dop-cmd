@@ -112,6 +112,6 @@ def test_dry_run_through_main(example_config, capsys):
     assert out[:2] == ["WOULD RUN uv sync", "WOULD RUN make test"]
 
 
-def test_later_slice_verbs_exit_1(example_config, capsys):
-    assert cli.main(["--config", str(example_config), "logs", "app"]) == 1
-    assert "not implemented in this slice" in capsys.readouterr().err
+def test_logs_none_component_exits_3_through_the_cli(example_config, capsys):
+    assert cli.main(["--config", str(example_config), "logs", "cli"]) == 3
+    assert "cli has no runtime; nothing to follow" in capsys.readouterr().out

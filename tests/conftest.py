@@ -89,3 +89,23 @@ def write_config(tmp_path: Path):
 @pytest.fixture
 def example_config(write_config) -> Path:
     return write_config()
+
+
+@pytest.fixture
+def proc_config(write_config, tmp_path):
+    """The example with `app` made harmless: setup is `true`, run is a `sleep` (nothing real, no network)."""
+    text = EXAMPLE.replace('setup = "pnpm install --frozen-lockfile"', 'setup = "true"').replace(
+        'run = "pnpm -C artifacts/dop dev"', 'run = "sleep 30"'
+    )
+    (tmp_path / "repos" / "dop-app").mkdir(parents=True)
+    return write_config(text)
+
+
+@pytest.fixture
+def reap_owned():
+    """Stop whatever a test left running under the given state dirs."""
+    managers = []
+    yield managers.append
+    for pm, config in managers:
+        for component in config.components.values():
+            pm.stop(component, grace=1)

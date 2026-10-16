@@ -1,7 +1,7 @@
 """Processes `dop` owns, and the lock that serialises `up`, `down` and `reset`.
 
-The lock lives here (S0b); starting, observing and stopping `process`
-components arrives with the process side (S0c).
+The lock serialises `up`, `down` and `reset`; `<name>.pid` and `<name>.log`
+under the state directory record the `process` components `dop` started.
 """
 
 from __future__ import annotations
@@ -9,9 +9,10 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 from .config import Component
+from .core import process
 from .core.errors import ProcessError
 
 LOCK_FILENAME = "lock"
@@ -28,6 +29,23 @@ class LockHeld(ProcessError):
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _exists(pid: int) -> bool:
+    """The process, or any member of the group it led, exists (a child of ours that exited is reaped first)."""
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        pass
+    if _pid_alive(pid):
+        return True
+    try:
+        os.killpg(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -87,16 +105,72 @@ class ProcessManager:
                 except FileNotFoundError:
                     pass
 
-    # The process side arrives in S0c.
+    # ------------------------------------------------------------------ owned processes
 
-    def start(self, component: Component) -> int:
-        raise NotImplementedError("S0c")
-
-    def alive(self, component: Component) -> bool:
-        raise NotImplementedError("S0c")
-
-    def stop(self, component: Component) -> None:
-        raise NotImplementedError("S0c")
+    def pid_path(self, component: Component) -> Path:
+        return self.state_dir / f"{component.name}.pid"
 
     def log_path(self, component: Component) -> Path:
-        raise NotImplementedError("S0c")
+        return self.state_dir / f"{component.name}.log"
+
+    def start(
+        self,
+        component: Component,
+        *,
+        root: Path,
+        runner: Callable[..., process.Result] | None = None,
+        dry_run: bool = False,
+    ) -> int | None:
+        """Detach ``component.run`` in its repo; write ``<name>.pid``; return the pid (None in dry-run)."""
+        if not component.run:
+            raise ProcessError(f"{component.name} declares no run command")
+        runner = runner or process.run
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        result = runner(
+            component.run,
+            cwd=Path(root) / component.repo,
+            env=dict(component.env),
+            mode="detach",
+            log_file=self.log_path(component),
+            dry_run=dry_run,
+        )
+        if dry_run:
+            return None
+        if result.rc != 0 or result.pid is None:
+            raise ProcessError(f"could not start {component.name} (rc {result.rc}): {component.run}")
+        self.pid_path(component).write_text(f"{result.pid}\n", encoding="utf-8")
+        return result.pid
+
+    def alive(self, component: Component, *, cleanup: bool = True) -> int | None:
+        """The pid in ``<name>.pid`` if that process (or its group) still exists, else None.
+
+        A stale pid file is removed unless ``cleanup`` is False (read-only callers).
+        """
+        path = self.pid_path(component)
+        pid = _read_pid(path)
+        if pid is not None and _exists(pid):
+            return pid
+        if cleanup:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        return None
+
+    def stop(self, component: Component, grace: float = 10) -> bool:
+        """SIGTERM the process group, SIGKILL after ``grace`` seconds; drop the pid file. True if something was stopped."""
+        pid = self.alive(component)
+        if pid is None:
+            return False
+        process.kill_group(pid, grace=grace)
+        try:
+            self.pid_path(component).unlink()
+        except FileNotFoundError:
+            pass
+        return True
+
+    def owned(self) -> list[str]:
+        """Names with a pid file, sorted."""
+        if not self.state_dir.is_dir():
+            return []
+        return sorted(p.stem for p in self.state_dir.glob("*.pid"))

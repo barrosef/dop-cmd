@@ -16,8 +16,9 @@ from ..core import process
 from ..core.errors import ProcessError
 from ..kube import Kube
 from ..processes import LockHeld, ProcessManager
-from .down import stop_processes_or_note
-from .up import ENV_TOOLS, _ready_wait, bring_up
+from .down import stop_owned_processes
+from ..probe import http_ready
+from .up import ENV_TOOLS, _ready_wait, _wait_alive, bring_up
 
 
 def run(
@@ -29,6 +30,8 @@ def run(
     tool_check: Callable[[list[str]], None] | None = None,
     ready_wait: Callable[[str, float, bool], bool] = _ready_wait,
     processes: ProcessManager | None = None,
+    probe: Callable[[str], bool] = http_ready,
+    waiter: Callable[..., bool] = _wait_alive,
 ) -> int:
     dry_run = bool(getattr(args, "dry_run", False))
     processes = processes or ProcessManager(config.project.state_dir)
@@ -37,7 +40,7 @@ def run(
         (tool_check or process.require_tools)(environment_tools(config.environment, *ENV_TOOLS, "down"))
 
     def go() -> int:
-        stop_processes_or_note(config, processes=processes, dry_run=dry_run, verb="reset")
+        stop_owned_processes(config, processes=processes, dry_run=dry_run, verb="reset")
         try:
             driver.ensure_running()
             driver.env_down()
@@ -47,6 +50,7 @@ def run(
         return bring_up(
             config, [], driver=driver, processes=processes, dry_run=dry_run,
             ready_wait=ready_wait, tool_check=lambda commands: None,
+            runner=runner, probe=probe, waiter=waiter,
         )
 
     if dry_run:
