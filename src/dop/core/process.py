@@ -27,7 +27,11 @@ from .security import redact
 MODES = ("stream", "capture", "detach")
 
 # Words that are not executables on PATH and must not be looked up.
-_SHELL_BUILTINS = {"cd", "export", "exec", "set", "unset", ".", "source", "eval", ":", "true", "false"}
+_SHELL_BUILTINS = {
+    "cd", "export", "exec", "set", "unset", ".", "source", "eval", ":", "true", "false", "trap", "exit", "return",
+    "command", "test", "[", "echo", "printf", "read", "wait", "kill", "type", "umask", "ulimit", "shift", "alias",
+    "if", "then", "else", "fi", "for", "while", "until", "do", "done", "case", "esac", "in", "{", "}", "(", ")", "!",
+}
 
 
 @dataclass(frozen=True)

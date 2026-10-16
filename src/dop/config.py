@@ -71,7 +71,7 @@ _KIND_FORBIDDEN = {
     "process": {"workloads", "logs"},
     "cluster": {"run", "env"},
 }
-_WORKLOAD = re.compile(r"^(deploy|deployment|sts|statefulset)/[a-z0-9-]+$")
+_WORKLOAD = re.compile(r"(deploy|deployment|sts|statefulset)/[a-z0-9-]+")
 _LAYER_TABLE_KEYS = {"forwards", "commands"}
 _TOP_KEYS = {"project", "environments", "components"}
 
@@ -223,7 +223,7 @@ def _str_list(table: dict[str, Any], key: str, where: str) -> list[str]:
 def _workloads(table: dict[str, Any], where: str) -> list[str]:
     refs = _str_list(table, "workloads", where)
     for ref in refs:
-        if not _WORKLOAD.match(ref):
+        if not _WORKLOAD.fullmatch(ref):
             raise ConfigError(
                 f"{where}.workloads: '{ref}' is not <kind>/<name> (kind: deploy, deployment, sts or statefulset; "
                 "name: lowercase letters, digits and dashes)"

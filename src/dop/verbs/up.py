@@ -77,7 +77,7 @@ def process_up(
         pid = processes.alive(component)
         if pid is not None:
             if component.ready and not probe(component.ready):
-                raise ProcessError(f"not ready: already running (pid {pid}) but {component.ready} does not answer")
+                raise ProcessError(f"{component.name} is running (pid {pid}) but not ready; `dop down` stops it")
             return f"already running, pid {pid}"
         (tool_check or process.tool_checker(Path(root) / component.repo))(
             [c for c in (component.setup, component.run) if c]

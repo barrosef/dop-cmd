@@ -172,7 +172,7 @@ def test_qa_w1_already_running_but_not_answering_is_not_ready(env, capsys):  # n
     pm.start(app, root=config.root)
     from dop.core.errors import ProcessError
 
-    with pytest.raises(ProcessError, match="not ready"):
+    with pytest.raises(ProcessError, match=r"app is running \(pid \d+\) but not ready; `dop down` stops it"):
         _up_process(config, pm, app, probe=lambda url: False)
     assert pm.alive(app) is not None  # not ours to kill here: it was already running
 
@@ -218,8 +218,8 @@ def test_qa_w3_a_reused_pid_is_stale_not_ours(env):  # noqa: F811
     assert pm.alive(app) == pid
     stranger = subprocess.Popen(["sleep", "30"], start_new_session=True)
     try:
-        # The file says "pnpm", the pid is a `sleep`: a reused number, not our process.
-        pm.pid_path(app).write_text(json.dumps({"pid": stranger.pid, "exe": "pnpm", "exes": ["pnpm"]}))
+        # The file carries another start time than the process behind the pid: a reused number.
+        pm.pid_path(app).write_text(json.dumps({"pid": stranger.pid, "exe": "sleep", "lstart": "Mon Jan  1 00:00:00 2001"}))
         assert pm.alive(app) is None
         assert not pm.pid_path(app).exists()
         assert stranger.poll() is None  # and nothing was signalled
@@ -238,6 +238,49 @@ def test_qa_w3_a_changed_start_time_is_stale(env):  # noqa: F811
     pm.pid_path(app).write_text(json.dumps(record))
     assert pm.alive(app) is None
     process.kill_group(pid, grace=1)
+
+
+def test_qa_s7_a_wrapper_script_is_alive_and_stoppable(env):  # noqa: F811
+    config, pm = env
+    app = _app(config, run="./start.sh")
+    script = config.root / app.repo / "start.sh"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("#!/bin/sh\nexec sleep 30\n")
+    script.chmod(0o755)
+    pid = pm.start(app, root=config.root)
+    assert pm.alive(app) == pid
+    assert pm.stop(app, grace=2) is True
+    assert pm.alive(app) is None
+
+
+def test_qa_s7_an_exec_run_is_alive_and_stoppable(env):  # noqa: F811
+    config, pm = env
+    app = _app(config, run="exec sleep 30")
+    pid = pm.start(app, root=config.root)
+    assert pm.alive(app) == pid
+    assert pm.stop(app, grace=2) is True
+    assert pm.alive(app) is None
+
+
+def test_qa_s7_a_bare_pid_file_has_no_identity(env):  # noqa: F811
+    config, pm = env
+    app = _app(config, run="sleep 30")
+    pid = pm.start(app, root=config.root)
+    pm.pid_path(app).write_text(f"{pid}\n")
+    assert pm.alive(app) == pid
+    pm.stop(app, grace=2)
+
+
+def test_qa_s7_a_workload_with_a_trailing_newline_is_rejected():
+    from dop.config import _WORKLOAD
+
+    assert _WORKLOAD.fullmatch("deploy/x")
+    assert not _WORKLOAD.fullmatch("deploy/x\n")
+
+
+@pytest.mark.parametrize("cmd", ["trap '' TERM; sleep 600", "exec sleep 600", "set -e; echo hi", "if true; then :; fi"])
+def test_qa_s7_a_leading_builtin_or_keyword_passes_the_tool_check(cmd):
+    process.require_tools([cmd])
 
 
 # ------------------------------------------------------------------ W4

@@ -7,7 +7,6 @@ under the state directory record the `process` components `dop` started.
 from __future__ import annotations
 
 import json
-import re
 import os
 import subprocess
 import time
@@ -77,22 +76,8 @@ def _ps(field: str, pid: int) -> str | None:
     return out if done.returncode == 0 and out else None
 
 
-def _executables(cmd: str) -> list[str]:
-    """Executable names of a shell command: the first word of each `&&`/`||`/`;`/`|` segment, basenames, first segment first.
-
-    A shell that execs the last command of ``a && b`` shows ``b`` in ``ps``, so the
-    first word alone would call a live process a stranger.
-    """
-    names: list[str] = []
-    for segment in re.split(r"&&|\|\||[;|\n]", cmd):
-        exe = process.executable_of(segment)
-        if exe and os.path.basename(exe) not in names:
-            names.append(os.path.basename(exe))
-    return names
-
-
 def _read_record(path: Path) -> dict | None:
-    """The pid file: JSON ``{pid, exe, started}``; a bare pid (older file) reads as a record with no identity."""
+    """The pid file: JSON ``{pid, exe, lstart, written}``; a bare pid (older file) reads as a record with no identity."""
     try:
         text = path.read_text(encoding="utf-8").strip()
     except OSError:
@@ -108,15 +93,15 @@ def _read_record(path: Path) -> dict | None:
 
 
 def _identity_ok(record: dict) -> bool:
-    """A pid is trusted only while the process behind it still looks like the one `dop` started."""
+    """A pid is trusted while its start time is the one recorded: a reused pid starts at another time.
+
+    The command text is never compared: a wrapper script or an ``exec`` shows
+    another name in ``ps`` than the ``run`` line. No recorded start time, or no
+    ``ps``, means the pid is trusted.
+    """
     pid = record["pid"]
     if not _pid_alive(pid):
         return True  # only the group's other members remain; the kernel does not reuse a pid that is a live group id
-    exes = record.get("exes") or ([record["exe"]] if record.get("exe") else [])
-    if exes:
-        args = _ps("args", pid)
-        if args is not None and not any(exe in args for exe in exes):
-            return False
     started = record.get("lstart")
     if started:
         now = _ps("lstart", pid)
@@ -203,11 +188,9 @@ class ProcessManager:
             return None
         if result.rc != 0 or result.pid is None:
             raise ProcessError(f"could not start {component.name} (rc {result.rc}): {component.run}")
-        exes = _executables(component.run)
         record = {
             "pid": result.pid,
-            "exe": exes[0] if exes else None,
-            "exes": exes,
+            "exe": process.executable_of(component.run),
             "lstart": _ps("lstart", result.pid),
             "written": time.time(),
         }
